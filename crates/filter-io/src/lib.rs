@@ -8,7 +8,7 @@ use std::path::Path;
 
 mod export;
 pub mod preset;
-pub use export::write_srgb16_png;
+pub use export::{write_srgb16_png, write_srgb16_png_with_exif};
 
 pub struct DecodedImage {
     pub buffer: ImageBuffer,
