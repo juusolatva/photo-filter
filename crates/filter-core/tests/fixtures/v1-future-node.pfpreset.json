@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "process_version": 1,
+  "id": "550e8400-e29b-41d4-a716-446655440001",
+  "name": "Future filter",
+  "future_metadata": {"ignored": true},
+  "patch": {
+    "future_section": {"enabled": true},
+    "custom_stack": [{
+      "id": "7f9c2b1e-3a4d-4e5f-8a6b-1c2d3e4f5a6b",
+      "name": "Future bloom",
+      "enabled": true,
+      "position": "AfterColor",
+      "op": {
+        "type": "SpectralBloomV7",
+        "threshold": 1.7,
+        "nested": {"payload": [1, null, "preserve me", {"mode": true}]},
+        "exact_integer": 18446744073709551615
+      }
+    }]
+  }
+}

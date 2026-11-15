@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "process_version": 1,
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "Warm Film Fade",
+  "author": "fixture",
+  "tags": ["film", "warm"],
+  "patch": {
+    "calibration": { "exposure": 0.15 },
+    "tone": { "contrast": 0.12 },
+    "curves": { "master": [[0.0, 0.05], [0.25, 0.22], [0.75, 0.78], [1.0, 0.95]] },
+    "color": null,
+    "detail": null,
+    "finishing": null,
+    "custom_stack_mode": "Replace",
+    "custom_stack": [{
+      "id": "7f9c2b1e-3a4d-4e5f-8a6b-1c2d3e4f5a6b",
+      "name": "Soft Grain",
+      "enabled": true,
+      "position": "AfterFinishing",
+      "opacity": 0.4,
+      "blend_mode": "Normal",
+      "op": { "type": "FilmGrain", "amount": 0.25, "size": 1.2, "roughness": 0.5 }
+    }]
+  }
+}

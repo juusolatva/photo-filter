@@ -1,7 +1,7 @@
 use crate::export::{ExportJob, ExportResult};
 use crate::preview::PreviewCallback;
 use eframe::egui;
-use filter_core::ImageBuffer;
+use filter_core::{ImageBuffer, edit::EditState};
 use filter_gpu::{ExposureRenderer, SourceTexture};
 use filter_io::DecodedImage;
 use std::{
@@ -37,7 +37,7 @@ pub struct PhotoApp {
     generation: u64,
     loading: bool,
     status: String,
-    ev: f32,
+    edit: EditState,
     zoom: f32,
     pan: egui::Vec2,
     export: Option<ExportJob>,
@@ -86,7 +86,7 @@ impl PhotoApp {
             generation: 0,
             loading: false,
             status: "Open a JPEG, PNG, WebP or TIFF to begin".into(),
-            ev: 0.0,
+            edit: EditState::default(),
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             export: None,
@@ -126,7 +126,7 @@ impl PhotoApp {
             return;
         };
         self.dialog_open = true;
-        let ev = self.ev;
+        let ev = self.edit.calibration.exposure;
         let tx = self.dialog_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -197,7 +197,7 @@ impl eframe::App for PhotoApp {
                         proxy.height()
                     );
                     self.source = Some(source);
-                    self.ev = 0.0;
+                    self.edit = EditState::default();
                     self.zoom = 1.0;
                     self.pan = egui::Vec2::ZERO;
                 }
@@ -243,10 +243,11 @@ impl eframe::App for PhotoApp {
                 ui.heading("Basic adjustments");
                 ui.add_enabled(
                     self.source.is_some(),
-                    egui::Slider::new(&mut self.ev, -5.0..=5.0).text("Exposure EV"),
+                    egui::Slider::new(&mut self.edit.calibration.exposure, -5.0..=5.0)
+                        .text("Exposure EV"),
                 );
                 if ui.button("Reset exposure").clicked() {
-                    self.ev = 0.0;
+                    self.edit.calibration.exposure = 0.0;
                 }
                 ui.separator();
                 if ui
@@ -308,7 +309,7 @@ impl eframe::App for PhotoApp {
                         frame: self.renderer.frame_region(
                             &rs.device,
                             texture,
-                            self.ev,
+                            self.edit.calibration.exposure,
                             [origin.x, origin.y, extent.x, extent.y],
                         ),
                     };
