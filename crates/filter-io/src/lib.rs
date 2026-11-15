@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use filter_core::ImageBuffer;
 use half::f16;
 use image::{ImageDecoder, ImageReader, metadata::Orientation};
-use moxcms::{ColorProfile, Layout, ToneReprCurve, TransformOptions};
+use moxcms::{ColorProfile, DataColorSpace, Layout, ToneReprCurve, TransformOptions};
 use std::path::Path;
 
 pub struct DecodedImage {
@@ -14,10 +14,19 @@ pub struct DecodedImage {
 }
 
 /// A conservative 2 GiB peak working budget (source decode, float conversion, CMS and f16 storage).
-const MAX_PIXELS: u64 = 2 * 1024 * 1024 * 1024 / 48;
+const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_PIXELS: u64 = (2 * 1024 * 1024 * 1024 - 2 * MAX_METADATA_BYTES as u64) / 48;
 
 pub fn decode(path: &Path) -> Result<DecodedImage> {
-    let reader = ImageReader::open(path)?.with_guessed_format()?;
+    let file = std::fs::File::open(path)?;
+    ensure!(
+        file.metadata()?.len() <= MAX_FILE_BYTES,
+        "Input file exceeds the initial 512 MiB limit"
+    );
+    // ImageReader also applies its default 512 MiB decoder allocation limit.
+    // This is a working-set estimate, not an OS-enforced RSS limit.
+    let reader = ImageReader::new(std::io::BufReader::new(file)).with_guessed_format()?;
     let mut decoder = reader
         .into_decoder()
         .context("Unsupported or invalid image")?;
@@ -27,7 +36,19 @@ pub fn decode(path: &Path) -> Result<DecodedImage> {
         "Image exceeds the initial 2 GiB working-memory budget (maximum {MAX_PIXELS} pixels)"
     );
     let icc_profile = decoder.icc_profile()?;
+    ensure!(
+        icc_profile
+            .as_ref()
+            .is_none_or(|b| b.len() <= MAX_METADATA_BYTES),
+        "ICC metadata exceeds the 16 MiB limit"
+    );
     let exif_bytes = decoder.exif_metadata()?;
+    ensure!(
+        exif_bytes
+            .as_ref()
+            .is_none_or(|b| b.len() <= MAX_METADATA_BYTES),
+        "EXIF metadata exceeds the 16 MiB limit"
+    );
     let source_orientation = decoder.orientation()?;
     let mut image = image::DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(source_orientation);
@@ -60,8 +81,13 @@ fn convert_to_working(rgba: &[f32], source: &ColorProfile) -> Result<Vec<[f16; 4
     destination.red_trc = Some(linear.clone());
     destination.green_trc = Some(linear.clone());
     destination.blue_trc = Some(linear);
+    let input_layout = match source.color_space {
+        DataColorSpace::Rgb => Layout::Rgba,
+        DataColorSpace::Gray => Layout::Gray,
+        _ => anyhow::bail!("Unsupported ICC color space: {:?}", source.color_space),
+    };
     let transform = source.create_transform_f32(
-        Layout::Rgba,
+        input_layout,
         &destination,
         Layout::Rgba,
         TransformOptions {
@@ -73,7 +99,13 @@ fn convert_to_working(rgba: &[f32], source: &ColorProfile) -> Result<Vec<[f16; 4
     let mut pixels = Vec::with_capacity(rgba.len() / 4);
     for chunk in rgba.chunks(4096 * 4) {
         let mut output = vec![0.0; chunk.len()];
-        transform.transform(chunk, &mut output)?;
+        if input_layout == Layout::Gray {
+            // Decoded gray samples are replicated into RGB; CMS must still see one channel.
+            let gray: Vec<f32> = chunk.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
+            transform.transform(&gray, &mut output)?;
+        } else {
+            transform.transform(chunk, &mut output)?;
+        }
         for (rgb, original) in output
             .as_chunks::<4>()
             .0
@@ -132,6 +164,48 @@ mod tests {
         let red = decoded.buffer.pixels()[0].map(f16::to_f32);
         let blue = decoded.buffer.pixels()[1].map(f16::to_f32);
         assert!(red[0] > red[2] && blue[2] > blue[0]);
+    }
+    #[test]
+    fn tagged_grayscale_png_opens_in_working_space() {
+        use image::ImageEncoder;
+        let path =
+            std::env::temp_dir().join(format!("photo-filter-gray-{}.png", std::process::id()));
+        let mut encoder =
+            image::codecs::png::PngEncoder::new(std::fs::File::create(&path).unwrap());
+        encoder
+            .set_icc_profile(ColorProfile::new_gray_with_gamma(2.2).encode().unwrap())
+            .unwrap();
+        encoder
+            .write_image(&[128, 64], 1, 1, image::ExtendedColorType::La8)
+            .unwrap();
+        let decoded = decode(&path);
+        std::fs::remove_file(path).unwrap();
+        let p = decoded.unwrap().buffer.pixels()[0].map(f16::to_f32);
+        let expected = (128.0_f32 / 255.0).powf(2.2);
+        for c in &p[..3] {
+            assert!((c - expected).abs() < 0.005, "{p:?}");
+        }
+        assert!((p[3] - 64.0 / 255.0).abs() < 0.001);
+    }
+    #[test]
+    fn oversized_metadata_is_rejected() {
+        use image::ImageEncoder;
+        let path =
+            std::env::temp_dir().join(format!("photo-filter-metadata-{}.png", std::process::id()));
+        let mut encoder =
+            image::codecs::png::PngEncoder::new(std::fs::File::create(&path).unwrap());
+        encoder
+            .set_exif_metadata(vec![0; MAX_METADATA_BYTES + 1])
+            .unwrap();
+        encoder
+            .write_image(&[0, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let error = decode(&path).err().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            error.to_string().contains("EXIF metadata exceeds"),
+            "{error:#}"
+        );
     }
     #[test]
     fn srgb_white_and_alpha_survive() {
