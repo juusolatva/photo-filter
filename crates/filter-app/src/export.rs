@@ -33,6 +33,7 @@ impl ExportJob {
         path: PathBuf,
         ctx: eframe::egui::Context,
     ) -> Result<Self> {
+        validate_png_path(&path)?;
         let plan = TilePlan::new(
             source.buffer.width(),
             source.buffer.height(),
@@ -170,9 +171,39 @@ fn publish_export(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(std::path::Path::new("."));
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".photo-filter-");
+    #[cfg(unix)]
+    let existing_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        let existing_mode = match std::fs::metadata(path) {
+            Ok(metadata) => Some(metadata.permissions().mode() & 0o777),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("Could not inspect export destination"),
+        };
+        // Keep replacements private while writing; restore their original bits
+        // only once complete. New files use normal creation/umask defaults.
+        builder.permissions(std::fs::Permissions::from_mode(
+            if existing_mode.is_some() {
+                0o600
+            } else {
+                0o666
+            },
+        ));
+        existing_mode
+    };
+    let mut temporary = builder
+        .tempfile_in(parent)
         .context("Could not create export temporary file")?;
     write(temporary.as_file_mut())?;
+    #[cfg(unix)]
+    if let Some(mode) = existing_mode {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .context("Could not preserve destination permissions")?;
+    }
     temporary
         .as_file()
         .sync_all()
@@ -185,10 +216,58 @@ fn publish_export(
     Ok(())
 }
 
+fn validate_png_path(path: &std::path::Path) -> Result<()> {
+    ensure!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png")),
+        "PNG export requires a filename ending in .png"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn export_requires_png_extension_without_changing_selected_destination() {
+        assert!(validate_png_path(std::path::Path::new("photo.png")).is_ok());
+        assert!(validate_png_path(std::path::Path::new("photo.PNG")).is_ok());
+        assert!(validate_png_path(std::path::Path::new("photo.jpg")).is_err());
+        assert!(validate_png_path(std::path::Path::new("photo")).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn export_uses_creation_defaults_and_preserves_existing_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("normal-file");
+        std::fs::write(&reference, b"normal creation").unwrap();
+        let path = directory.path().join("edited.png");
+        let cancel = AtomicBool::new(false);
+        publish_export(&path, &cancel, |file| {
+            file.write_all(b"new")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(reference).unwrap().permissions().mode() & 0o777
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        publish_export(&path, &cancel, |file| {
+            file.write_all(b"replacement")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
 
     #[test]
     fn failed_or_cancelled_export_preserves_destination_and_cleans_temp_file() {
