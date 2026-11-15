@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use filter_core::cpu_eval::BasicAdjustments;
 use filter_gpu::{TilePlan, TiledExposure};
-use filter_io::{DecodedImage, JpegOptions, PngBitDepth, PngOptions};
+use filter_io::{DecodedImage, JpegOptions, PngBitDepth, PngOptions, WebPOptions};
 use std::io::Write;
 use std::{
     path::PathBuf,
@@ -17,12 +17,14 @@ use std::{
 pub enum ExportFormat {
     Png(PngOptions),
     Jpeg(JpegOptions),
+    WebP(WebPOptions),
 }
 impl ExportFormat {
     pub fn extension(self) -> &'static str {
         match self {
             Self::Png(_) => "png",
             Self::Jpeg(_) => "jpg",
+            Self::WebP(_) => "webp",
         }
     }
     pub fn label(self) -> &'static str {
@@ -32,6 +34,7 @@ impl ExportFormat {
                 PngBitDepth::Sixteen => "16-bit PNG",
             },
             Self::Jpeg(_) => "JPEG",
+            Self::WebP(_) => "Lossless WebP",
         }
     }
     fn validate_path(self, path: &std::path::Path) -> Result<()> {
@@ -41,6 +44,7 @@ impl ExportFormat {
             .unwrap_or_default();
         let valid = match self {
             Self::Png(_) => extension.eq_ignore_ascii_case("png"),
+            Self::WebP(_) => extension.eq_ignore_ascii_case("webp"),
             Self::Jpeg(_) => {
                 extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
             }
@@ -52,6 +56,7 @@ impl ExportFormat {
             match self {
                 Self::Png(_) => ".png",
                 Self::Jpeg(_) => ".jpg or .jpeg",
+                Self::WebP(_) => ".webp",
             }
         );
         Ok(())
@@ -238,6 +243,15 @@ fn export_image(
                 bands,
                 || cancel.load(Ordering::Relaxed),
             )?,
+            ExportFormat::WebP(options) => filter_io::write_srgb8_webp_cancellable(
+                &mut output,
+                source.width(),
+                source.height(),
+                exif,
+                options,
+                bands,
+                || cancel.load(Ordering::Relaxed),
+            )?,
         }
         output.flush()?;
         Ok(())
@@ -360,6 +374,19 @@ mod tests {
     }
 
     #[test]
+    fn webp_requires_its_extension_case_insensitively() {
+        let format = ExportFormat::WebP(WebPOptions::default());
+        assert_eq!(format.extension(), "webp");
+        assert_eq!(format.label(), "Lossless WebP");
+        for path in ["photo.webp", "photo.WEBP"] {
+            assert!(format.validate_path(std::path::Path::new(path)).is_ok());
+        }
+        for path in ["photo.png", "photo.jpg", "photo"] {
+            assert!(format.validate_path(std::path::Path::new(path)).is_err());
+        }
+    }
+
+    #[test]
     fn cancellation_during_encoding_preserves_destination() {
         struct CancelAfterWrite<'a> {
             file: &'a mut std::fs::File,
@@ -383,6 +410,7 @@ mod tests {
             }),
             ExportFormat::Png(PngOptions::default()),
             ExportFormat::Jpeg(JpegOptions::default()),
+            ExportFormat::WebP(WebPOptions::default()),
         ] {
             let path = directory
                 .path()
@@ -405,13 +433,16 @@ mod tests {
                     ExportFormat::Jpeg(options) => {
                         filter_io::write_srgb8_jpeg(output, 17, 9, None, options, bands)
                     }
+                    ExportFormat::WebP(options) => {
+                        filter_io::write_srgb8_webp(output, 17, 9, None, options, bands)
+                    }
                 }
             });
             assert!(result.is_err());
             assert!(cancel.load(Ordering::Relaxed));
             assert_eq!(std::fs::read(&path).unwrap(), b"original");
         }
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 3);
     }
 
     #[test]
@@ -492,7 +523,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a software GPU"]
-    fn png_and_jpeg_export_render_the_captured_basic_adjustments() {
+    fn image_exports_render_the_captured_basic_adjustments() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::PRIMARY,
@@ -651,6 +682,37 @@ mod tests {
                     let actual = image::open(&path).unwrap();
                     assert_eq!(actual.color(), image::ColorType::Rgba8);
                     let actual = actual.into_rgba8();
+                    let webp_path = directory.path().join("adjusted.webp");
+                    completed.store(0, Ordering::Relaxed);
+                    export_image(
+                        &device,
+                        &queue,
+                        &image,
+                        Some(&exif),
+                        &snapshot,
+                        &webp_path,
+                        ExportFormat::WebP(WebPOptions { dither_seed: seed }),
+                        TilePlan::new(w, h, &device.limits(), tile_edge).unwrap(),
+                        &AtomicBool::new(false),
+                        &completed,
+                    )
+                    .unwrap();
+                    assert_eq!(completed.load(Ordering::Relaxed), count);
+                    let reloaded_webp = filter_io::decode(&webp_path).unwrap();
+                    assert_eq!(
+                        reloaded_webp.exif_bytes.as_deref(),
+                        Some(expected_exif.as_slice())
+                    );
+                    assert_eq!(
+                        reloaded_webp.source_orientation,
+                        image::metadata::Orientation::NoTransforms
+                    );
+                    assert!(reloaded_webp.icc_profile.is_some());
+                    assert_eq!(
+                        image::open(&webp_path).unwrap().into_rgba8(),
+                        actual,
+                        "lossless WebP must preserve the same quantized pixels as PNG8"
+                    );
                     for (original, actual) in image.pixels().iter().zip(actual.pixels()) {
                         let working = snapshot
                             .pixel(original.map(half::f16::to_f32))
@@ -742,8 +804,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a software GPU and about 550 MiB RAM; exercises >36MP PNG/JPEG export"]
-    fn large_png_and_jpeg_export_exceeds_texture_and_full_readback_limits() {
+    #[ignore = "requires a software GPU and about 800 MiB RAM; exercises >36MP image exports"]
+    fn large_image_exports_exceed_texture_and_full_readback_limits() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::PRIMARY,
@@ -901,6 +963,51 @@ mod tests {
                 u64::from(w) * u64::from(h),
                 png8_started.elapsed()
             );
+            let webp_path = directory.path().join("large.webp");
+            completed.store(0, Ordering::Relaxed);
+            let webp_started = Instant::now();
+            export_image(
+                &device,
+                &queue,
+                &source,
+                None,
+                &BasicAdjustments::exposure(1.0).unwrap(),
+                &webp_path,
+                ExportFormat::WebP(WebPOptions::default()),
+                TilePlan::new(w, h, &device.limits(), 1024).unwrap(),
+                &cancel,
+                &completed,
+            )
+            .unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), total);
+            use image::ImageDecoder;
+            let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::BufReader::new(
+                std::fs::File::open(&webp_path).unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(decoder.dimensions(), (w, h));
+            assert_eq!(decoder.color_type(), image::ColorType::Rgba8);
+            assert!(decoder.icc_profile().unwrap().is_some());
+            assert!(decoder.exif_metadata().unwrap().is_none());
+            let rgba = image::DynamicImage::from_decoder(decoder)
+                .unwrap()
+                .into_rgba8();
+            let mut png_reader = png::Decoder::new(std::io::BufReader::new(
+                std::fs::File::open(&png8_path).unwrap(),
+            ))
+            .read_info()
+            .unwrap();
+            for row in rgba.as_raw().chunks_exact(w as usize * 4) {
+                assert_eq!(row, png_reader.next_row().unwrap().unwrap().data());
+            }
+            assert!(png_reader.next_row().unwrap().is_none());
+            png_reader.finish().unwrap();
+            drop(rgba);
+            eprintln!(
+                "Validated {} lossless WebP pixels across {total} tiles in {:.2?}",
+                u64::from(w) * u64::from(h),
+                webp_started.elapsed()
+            );
             let jpeg_path = directory.path().join("large.jpg");
             completed.store(0, Ordering::Relaxed);
             let jpeg_started = Instant::now();
@@ -922,7 +1029,6 @@ mod tests {
             )
             .unwrap();
             assert_eq!(completed.load(Ordering::Relaxed), total);
-            use image::ImageDecoder;
             let mut decoder = image::codecs::jpeg::JpegDecoder::new(std::io::BufReader::new(
                 std::fs::File::open(&jpeg_path).unwrap(),
             ))
