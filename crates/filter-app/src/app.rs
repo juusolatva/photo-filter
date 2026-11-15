@@ -244,61 +244,62 @@ impl eframe::App for PhotoApp {
         egui::Panel::right("adjustments")
             .default_size(220.0)
             .show(ui, |ui| {
-                ui.heading("Basic adjustments");
-                egui::ScrollArea::vertical()
-                    .max_height(420.0)
-                    .show(ui, |ui| {
-                        ui.add_enabled_ui(self.source.is_some(), |ui| {
-                            ui.add(
-                                egui::Slider::new(&mut self.edit.calibration.exposure, -5.0..=5.0)
-                                    .text("Exposure EV"),
-                            );
-                            for (label, value) in [
-                                ("Temperature", &mut self.edit.calibration.temperature),
-                                ("Tint", &mut self.edit.calibration.tint),
-                                ("Brightness", &mut self.edit.tone.brightness),
-                                ("Contrast", &mut self.edit.tone.contrast),
-                                ("Highlights", &mut self.edit.tone.highlights),
-                                ("Shadows", &mut self.edit.tone.shadows),
-                                ("Whites", &mut self.edit.tone.whites),
-                                ("Blacks", &mut self.edit.tone.blacks),
-                                ("Vibrance", &mut self.edit.color.scalars.vibrance),
-                                ("Saturation", &mut self.edit.color.scalars.saturation),
-                            ] {
-                                ui.add(egui::Slider::new(value, -1.0..=1.0).text(label));
-                            }
-                            if ui.button("Reset adjustments").clicked() {
-                                self.edit = EditState::default();
-                            }
-                        });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("Basic adjustments");
+                    ui.add_enabled_ui(self.source.is_some(), |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut self.edit.calibration.exposure, -5.0..=5.0)
+                                .text("Exposure EV"),
+                        );
+                        for (label, value) in [
+                            ("Temperature", &mut self.edit.calibration.temperature),
+                            ("Tint", &mut self.edit.calibration.tint),
+                            ("Brightness", &mut self.edit.tone.brightness),
+                            ("Contrast", &mut self.edit.tone.contrast),
+                            ("Highlights", &mut self.edit.tone.highlights),
+                            ("Shadows", &mut self.edit.tone.shadows),
+                            ("Whites", &mut self.edit.tone.whites),
+                            ("Blacks", &mut self.edit.tone.blacks),
+                            ("Vibrance", &mut self.edit.color.scalars.vibrance),
+                            ("Saturation", &mut self.edit.color.scalars.saturation),
+                        ] {
+                            ui.add(egui::Slider::new(value, -1.0..=1.0).text(label));
+                        }
+                        if ui.button("Reset adjustments").clicked() {
+                            self.edit = EditState::default();
+                        }
                     });
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        self.source.is_some() && !self.dialog_open && self.export.is_none(),
-                        egui::Button::new("Export PNG…"),
-                    )
-                    .clicked()
-                {
-                    self.export_dialog(&ctx);
-                }
-                ui.label("Full resolution · 16-bit sRGB · preserves alpha");
-                if let Some(export) = &self.export {
-                    ui.add(egui::ProgressBar::new(export.progress()).show_percentage());
-                    ui.label("Exporting captured adjustments");
+                    ui.separator();
                     if ui
-                        .add_enabled(!export.is_cancelling(), egui::Button::new("Cancel export"))
+                        .add_enabled(
+                            self.source.is_some() && !self.dialog_open && self.export.is_none(),
+                            egui::Button::new("Export PNG…"),
+                        )
                         .clicked()
                     {
-                        export.cancel();
+                        self.export_dialog(&ctx);
                     }
-                    if export.is_cancelling() {
-                        ui.label("Cancelling…");
+                    ui.label("Full resolution · 16-bit sRGB · preserves alpha");
+                    if let Some(export) = &self.export {
+                        ui.add(egui::ProgressBar::new(export.progress()).show_percentage());
+                        ui.label("Exporting captured adjustments");
+                        if ui
+                            .add_enabled(
+                                !export.is_cancelling(),
+                                egui::Button::new("Cancel export"),
+                            )
+                            .clicked()
+                        {
+                            export.cancel();
+                        }
+                        if export.is_cancelling() {
+                            ui.label("Cancelling…");
+                        }
                     }
-                }
-                if !self.export_status.is_empty() {
-                    ui.label(&self.export_status);
-                }
+                    if !self.export_status.is_empty() {
+                        ui.label(&self.export_status);
+                    }
+                });
             });
         egui::CentralPanel::default().show(ui, |ui| {
             let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
