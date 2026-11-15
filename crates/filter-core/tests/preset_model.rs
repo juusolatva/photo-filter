@@ -351,3 +351,79 @@ fn invalid_stack_rolls_back_scalar_changes_and_existing_node_ids() {
     .unwrap();
     assert!(!edit.color.scalars.monochrome);
 }
+
+#[test]
+fn edit_deserialization_rejects_invalid_parameters_and_duplicate_node_ids() {
+    for raw in [
+        json!({"process_version":1,"calibration":{"exposure":9.}}),
+        json!({"process_version":1,"crop":[0.,0.,0.5,1.]}),
+        json!({"process_version":1,"curves":{"master":[[0.,0.],[0.,1.]]}}),
+    ] {
+        assert!(serde_json::from_value::<EditState>(raw).is_err());
+    }
+    let preset = Preset::from_json(PARTIAL).unwrap();
+    let mut edit = EditState::default();
+    preset.apply_to(&mut edit, &Sections::ALL).unwrap();
+    edit.custom_stack.push(edit.custom_stack[0].clone());
+    assert!(edit.validate().is_err());
+    assert!(serde_json::from_value::<EditState>(serde_json::to_value(edit).unwrap()).is_err());
+}
+
+#[test]
+fn stack_limits_apply_to_import_append_replace_and_edit_deserialization() {
+    let mut preset = Preset::from_json(FUTURE_NODE).unwrap();
+    let node = preset.patch.custom_stack.as_ref().unwrap()[0].clone();
+    preset.patch.custom_stack = Some(vec![node.clone(); MAX_STACK_NODES]);
+    let mut edit = EditState::default();
+    preset.apply_to(&mut edit, &Sections::ALL).unwrap();
+    assert_eq!(edit.custom_stack.len(), MAX_STACK_NODES);
+    let saved = preset.to_json().unwrap();
+    Preset::from_json(&saved).unwrap();
+    let before = edit.clone();
+    let append = PresetPatch {
+        custom_stack: Some(vec![node.clone()]),
+        custom_stack_mode: StackMode::Append,
+        ..Default::default()
+    };
+    assert!(edit.apply(&append, &Sections::ALL).is_err());
+    assert_eq!(edit, before);
+    // Replacing a full stack with a short one remains legal.
+    let replace = PresetPatch {
+        custom_stack: Some(vec![node.clone()]),
+        ..Default::default()
+    };
+    edit.apply(&replace, &Sections::ALL).unwrap();
+    assert_eq!(edit.custom_stack.len(), 1);
+    preset
+        .patch
+        .custom_stack
+        .as_mut()
+        .unwrap()
+        .push(node.clone());
+    assert!(preset.to_json().is_err());
+    let mut raw: Value = serde_json::from_str(&saved).unwrap();
+    let extra = raw["patch"]["custom_stack"][0].clone();
+    raw["patch"]["custom_stack"]
+        .as_array_mut()
+        .unwrap()
+        .push(extra);
+    assert!(Preset::from_json(&raw.to_string()).is_err());
+    edit.custom_stack = (0..=MAX_STACK_NODES)
+        .map(|_| {
+            let mut node = node.clone();
+            node.id = uuid::Uuid::new_v4();
+            node
+        })
+        .collect();
+    assert!(serde_json::from_value::<EditState>(serde_json::to_value(edit).unwrap()).is_err());
+}
+
+#[test]
+fn preset_input_byte_limit_is_checked_before_parsing() {
+    let mut at_limit = PARTIAL.to_owned();
+    at_limit.extend(std::iter::repeat_n(' ', MAX_PRESET_BYTES - at_limit.len()));
+    Preset::from_json(&at_limit).unwrap();
+    at_limit.push(' ');
+    let error = Preset::from_json(&at_limit).unwrap_err();
+    assert!(error.to_string().contains("bytes"));
+}

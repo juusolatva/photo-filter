@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Check before parsing so opaque future operation payloads are bounded too.
+pub const MAX_PRESET_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StackMode {
     #[default]
@@ -55,6 +58,25 @@ impl EditState {
     /// All changes are validated before publication; a failed patch leaves the
     /// destination untouched. Version policy is enforced by Preset::apply_to.
     pub fn apply(&mut self, patch: &PresetPatch, sections: &Sections) -> Result<(), ModelError> {
+        if self.custom_stack.len() > MAX_STACK_NODES {
+            return Err(ModelError(format!(
+                "custom stack exceeds {MAX_STACK_NODES} nodes"
+            )));
+        }
+        if sections.custom_stack
+            && let Some(nodes) = &patch.custom_stack
+        {
+            let retained = if patch.custom_stack_mode == StackMode::Append {
+                self.custom_stack.len()
+            } else {
+                0
+            };
+            if nodes.len() > MAX_STACK_NODES - retained {
+                return Err(ModelError(format!(
+                    "custom stack exceeds {MAX_STACK_NODES} nodes"
+                )));
+            }
+        }
         let mut next = self.clone();
         macro_rules! merge {
             ($($field:ident),*) => {$(
@@ -150,6 +172,11 @@ impl Preset {
         })
     }
     pub fn from_json(json: &str) -> Result<Self, ModelError> {
+        if json.len() > MAX_PRESET_BYTES {
+            return Err(ModelError(format!(
+                "preset exceeds {MAX_PRESET_BYTES} bytes"
+            )));
+        }
         let raw = serde_json::from_str(json).map_err(|e| ModelError(e.to_string()))?;
         let raw = migrate(raw)?;
         let preset: Self = serde_json::from_value(raw).map_err(|e| ModelError(e.to_string()))?;

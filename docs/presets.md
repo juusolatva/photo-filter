@@ -24,8 +24,14 @@ fn main() -> Result<(), filter_core::edit::ModelError> {
 
 `Preset::from_json` is the preset-loading boundary: it checks the raw schema,
 then deserializes and validates the patch. `Preset::to_json` validates before
-writing JSON. These methods do not access files. Low-level Serde deserialization
-of an `EditState` must be followed by `EditState::validate()` before use.
+writing JSON. These methods do not access files. Serde deserialization of an
+`EditState` also validates before returning it, including unique custom-node IDs.
+Use `EditState::validate()` after constructing or modifying an edit in Rust.
+
+Preset imports are capped at 16 MiB before parsing, including opaque operation
+payloads. Stacks are capped at 256 nodes; append/replace checks run before cloning
+the edit. These are library limits; file-reading callers must also bound the
+bytes they read before building an input string.
 
 `process_version: 1` pins algorithm behavior and the linear Rec.2020 working
 space. `schema_version: 1` describes the preset layout. Both are required in

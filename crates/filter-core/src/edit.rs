@@ -4,6 +4,9 @@ use crate::pipeline::FilterNode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Interactive stacks are bounded independently of their encoded preset size.
+pub const MAX_STACK_NODES: usize = 256;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelError(pub String);
 impl fmt::Display for ModelError {
@@ -279,7 +282,7 @@ impl Default for CropRect {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct EditState {
     // Required on deserialization: silently defaulting a missing algorithm version
     // would make an unversioned sidecar look safe to render.
@@ -301,6 +304,44 @@ pub struct EditState {
     #[serde(default)]
     pub custom_stack: Vec<FilterNode>,
 }
+impl<'de> Deserialize<'de> for EditState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            process_version: ProcessVersion,
+            #[serde(default)]
+            crop: CropRect,
+            #[serde(default)]
+            calibration: Calibration,
+            #[serde(default)]
+            tone: Tone,
+            #[serde(default)]
+            curves: Curves,
+            #[serde(default)]
+            color: Color,
+            #[serde(default)]
+            detail: Detail,
+            #[serde(default)]
+            finishing: Finishing,
+            #[serde(default)]
+            custom_stack: Vec<FilterNode>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let edit = Self {
+            process_version: wire.process_version,
+            crop: wire.crop,
+            calibration: wire.calibration,
+            tone: wire.tone,
+            curves: wire.curves,
+            color: wire.color,
+            detail: wire.detail,
+            finishing: wire.finishing,
+            custom_stack: wire.custom_stack,
+        };
+        edit.validate().map_err(serde::de::Error::custom)?;
+        Ok(edit)
+    }
+}
 impl EditState {
     pub fn validate(&self) -> Result<(), ModelError> {
         if self.crop != CropRect::default() {
@@ -315,6 +356,18 @@ impl EditState {
         self.color.validate()?;
         self.detail.validate()?;
         self.finishing.validate()?;
-        self.custom_stack.iter().try_for_each(FilterNode::validate)
+        if self.custom_stack.len() > MAX_STACK_NODES {
+            return Err(ModelError(format!(
+                "custom stack exceeds {MAX_STACK_NODES} nodes"
+            )));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for node in &self.custom_stack {
+            node.validate()?;
+            if !ids.insert(node.id) {
+                return Err(ModelError("duplicate custom-stack node ID".into()));
+            }
+        }
+        Ok(())
     }
 }
