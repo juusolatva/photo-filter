@@ -280,6 +280,24 @@ mod tests {
     }
 
     #[test]
+    fn merge_failures_do_not_advise_deselecting_unsupported_effects() {
+        let mut preset = Preset::from_json(include_str!(
+            "../../filter-core/tests/fixtures/v1-future-node.pfpreset.json"
+        ))
+        .unwrap();
+        let node = preset.patch.custom_stack.as_ref().unwrap()[0].clone();
+        preset.patch.custom_stack = Some(vec![node; filter_core::edit::MAX_STACK_NODES]);
+        let mut edit = EditState::default();
+        preset.apply_to(&mut edit, &Sections::ALL).unwrap();
+        preset.patch.custom_stack_mode = filter_core::preset::StackMode::Append;
+        let original = edit.clone();
+        let error = prepare_apply(&edit, &preset, &Sections::ALL).unwrap_err();
+        assert!(error.0.contains("custom stack exceeds"));
+        assert!(!error.0.contains("Deselect"));
+        assert_eq!(edit, original);
+    }
+
+    #[test]
     fn unknown_operations_and_metadata_survive_app_apply_capture_and_disk() {
         let json = include_str!("../../filter-core/tests/fixtures/v1-future-node.pfpreset.json");
         let mut preset = Preset::from_json(json).unwrap();

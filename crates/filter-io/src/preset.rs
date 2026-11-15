@@ -34,6 +34,18 @@ pub fn write(path: &Path, preset: &Preset) -> Result<()> {
         json.len() <= MAX_PRESET_BYTES,
         "Preset exceeds the 16 MiB limit"
     );
+    // Resolve an existing final-component link before choosing the sibling temp.
+    // Publishing over the selected link would detach it from a shared preset.
+    // Broken links are errors rather than silently replacing the link itself.
+    let destination = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Some(std::fs::canonicalize(path).context("Could not resolve preset destination link")?)
+        }
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("Could not inspect preset destination"),
+    };
+    let path = destination.as_deref().unwrap_or(path);
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -175,5 +187,51 @@ mod tests {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o640
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn linked_saves_update_target_and_preserve_link_and_target_permissions() {
+        use std::os::unix::{fs::PermissionsExt, fs::symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        let links = dir.path().join("links");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::create_dir(&links).unwrap();
+        let target = shared.join("preset.json");
+        std::fs::write(&target, "old content").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = links.join("linked.json");
+        symlink("../shared/preset.json", &link).unwrap();
+        let preset = Preset::capture("Shared", &EditState::default(), &Sections::ALL).unwrap();
+        write(&link, &preset).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("../shared/preset.json")
+        );
+        assert_eq!(read(&target).unwrap(), preset);
+        assert_eq!(read(&link).unwrap(), preset);
+        assert_eq!(
+            std::fs::metadata(target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(std::fs::read_dir(shared).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(links).unwrap().count(), 1);
+        let broken = dir.path().join("broken.json");
+        symlink("missing.json", &broken).unwrap();
+        assert!(write(&broken, &preset).is_err());
+        assert!(
+            std::fs::symlink_metadata(broken)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!dir.path().join("missing.json").exists());
     }
 }

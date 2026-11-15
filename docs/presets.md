@@ -44,6 +44,8 @@ Validation or writing failure leaves an existing destination intact. Temporary
 files are removed on failure. File work and native dialogs run on workers; the
 UI admits one dialog/preset file operation at a time. New files follow normal
 creation permissions/umask; replacements preserve existing Unix permission bits.
+Saving through an existing symbolic link updates its resolved target and keeps
+the link; a broken link is rejected without replacing it.
 The library caller owns overwrite confirmation.
 
 The library continues to support stored effects that the current desktop
