@@ -68,10 +68,13 @@ mod tests {
         let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(&output)).unwrap();
         assert_eq!(decoder.dimensions(), (3, 2));
         assert_eq!(decoder.color_type(), image::ColorType::Rgba16);
-        assert_eq!(
-            decoder.icc_profile().unwrap().unwrap(),
-            ColorProfile::new_srgb().encode().unwrap()
-        );
+        let icc = decoder.icc_profile().unwrap().unwrap();
+        let actual_profile = ColorProfile::new_from_slice(&icc).unwrap();
+        let mut expected_profile = ColorProfile::new_srgb();
+        // Profile constructors stamp the current second. Verify the profile's
+        // color definition without requiring two calls to share a clock tick.
+        expected_profile.creation_date_time = actual_profile.creation_date_time;
+        assert_eq!(icc, expected_profile.encode().unwrap());
         assert!(decoder.exif_metadata().unwrap().is_none());
         let rgba = image::DynamicImage::from_decoder(decoder)
             .unwrap()
