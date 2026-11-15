@@ -17,13 +17,15 @@ Choose **PNG** or **JPEG** under **Format**, then **Export…** to save the full
 image with a snapshot of the current adjustments and export settings. PNG produces 16-bit
 sRGB with straight alpha (`.png`). JPEG produces 8-bit sRGB (`.jpg`/`.jpeg`), with quality
 1–100 (default 90), a selectable background (default white) for linear-light alpha
-flattening, and optional seeded dithering. Both embed an output sRGB ICC profile and
-validate nonempty source EXIF, preserving it with recognized orientation reset to `1`.
+flattening, and optional seeded dithering that preserves solid 8-bit levels and clipped
+black/white. Both embed an output sRGB ICC profile and validate nonempty source EXIF,
+preserving it with recognized orientation reset to `1`.
 Malformed or oversized EXIF fails without replacing the destination; empty EXIF is omitted.
 JPEG EXIF is limited to 65527 bytes. See [the export contract](docs/export.md) for metadata
 limitations. Colors outside sRGB are clipped. Editing or opening another image can continue
 during export; **Cancel export** stops the captured job. Failure or cancellation before
-publication leaves an existing destination untouched. New exports use normal creation
+publication leaves an existing destination untouched. JPEG cancellation is checked within
+CPU conversion bands as well as rendering and encoding. New exports use normal creation
 permissions; replacements preserve existing Unix permission bits.
 
 Export shares the viewer's GPU device and submits one tile at a time, with asynchronous readback and non-blocking polling on a dedicated worker. It never allocates a full-image GPU texture or readback buffer. Tiles fit granted texture/buffer/dispatch limits, and padded 256-byte staging rows are stripped on readback. PNG encoding streams row bands, targeting 32 MiB per band (or one scanline for exceptionally wide images), plus tile buffers and the immutable half-float source. JPEG uses an additional RGB8 CPU buffer (3 bytes/pixel, capped at 512 MiB) for its explicit encoder. Use a release build for large photos.

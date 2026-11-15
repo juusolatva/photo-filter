@@ -47,13 +47,29 @@ fn normalized_exif(exif: Option<&[u8]>, limit: usize) -> Result<Option<Vec<u8>>>
 /// JPEG's APP1 segment permits at most 65527 raw EXIF bytes; larger EXIF fails.
 /// Caller owns cancellation of encoding writes and atomic file publication.
 pub fn write_srgb8_jpeg(
-    mut output: impl Write,
+    output: impl Write,
     width: u32,
     height: u32,
     exif: Option<&[u8]>,
     options: JpegOptions,
     bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
 ) -> Result<()> {
+    write_srgb8_jpeg_cancellable(output, width, height, exif, options, bands, || false)
+}
+
+/// Like [`write_srgb8_jpeg`], checking cancellation before allocation, between
+/// bands, at most every 4096 converted pixels, and before encoding. The caller
+/// must also check cancellation on output writes to interrupt the JPEG encoder.
+pub fn write_srgb8_jpeg_cancellable(
+    mut output: impl Write,
+    width: u32,
+    height: u32,
+    exif: Option<&[u8]>,
+    options: JpegOptions,
+    bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<()> {
+    ensure!(!is_cancelled(), "Export cancelled");
     ensure!(
         width > 0 && height > 0 && width <= 65535 && height <= 65535,
         "JPEG dimensions must be between 1 and 65535"
@@ -76,18 +92,23 @@ pub fn write_srgb8_jpeg(
         .map(|c| srgb_to_linear(f32::from(c) / 255.0));
     let mut remaining = count;
     for band in bands {
+        ensure!(!is_cancelled(), "Export cancelled");
         let band = band?;
         ensure!(
             band.len() as u64 <= remaining,
             "Too many pixels for JPEG dimensions"
         );
         remaining -= band.len() as u64;
-        for pixel in band {
-            let index = rgb.len() as u64 / 3;
-            rgb.extend_from_slice(&jpeg_pixel(pixel, background, options.dither_seed, index));
+        for chunk in band.chunks(4096) {
+            ensure!(!is_cancelled(), "Export cancelled");
+            for &pixel in chunk {
+                let index = rgb.len() as u64 / 3;
+                rgb.extend_from_slice(&jpeg_pixel(pixel, background, options.dither_seed, index));
+            }
         }
     }
     ensure!(remaining == 0, "Not enough pixels for JPEG dimensions");
+    ensure!(!is_cancelled(), "Export cancelled");
     let mut encoder =
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, options.quality);
     encoder.set_icc_profile(ColorProfile::new_srgb().encode()?)?;
@@ -121,9 +142,19 @@ fn jpeg_pixel(
             rgb[c] * alpha + background * (1.0 - alpha)
         };
         let value = linear_to_srgb(linear).clamp(0.0, 1.0) * 255.0;
-        let noise = dither_seed.map_or(0.0, |seed| triangular_noise(seed, index * 3 + c as u64));
-        (value + noise).round().clamp(0.0, 255.0) as u8
+        quantize_jpeg_channel(value, dither_seed, index * 3 + c as u64)
     })
+}
+
+fn quantize_jpeg_channel(value: f32, dither_seed: Option<u64>, sample: u64) -> u8 {
+    let nearest = value.round();
+    // Preserve representable levels, including black/white and clipped values.
+    // Allow small transfer/matrix rounding error (less than 0.0001 of a code step).
+    if (value - nearest).abs() <= 0.0001 {
+        return nearest as u8;
+    }
+    let noise = dither_seed.map_or(0.0, |seed| triangular_noise(seed, sample));
+    (value + noise).round().clamp(0.0, 255.0) as u8
 }
 
 fn triangular_noise(seed: u64, sample: u64) -> f32 {
@@ -253,6 +284,127 @@ mod tests {
         bytes.extend_from_slice(&long(0));
         bytes.extend_from_slice(b"Canon\0");
         bytes
+    }
+
+    #[test]
+    fn jpeg_cancellation_interrupts_conversion_within_one_large_band() {
+        let mut output = Vec::new();
+        let mut requests = 0;
+        let bands = std::iter::from_fn(|| {
+            requests += 1;
+            assert_eq!(requests, 1, "cancel before requesting the next band");
+            Some(Ok(vec![[f16::ONE; 4]; 256 * 64]))
+        });
+        let mut checkpoints = 0;
+        let error = write_srgb8_jpeg_cancellable(
+            &mut output,
+            256,
+            64,
+            None,
+            JpegOptions::default(),
+            bands,
+            || {
+                checkpoints += 1;
+                // Initial check, band check, first conversion chunk, second chunk.
+                checkpoints == 4
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "Export cancelled");
+        assert_eq!(checkpoints, 4);
+        assert_eq!(requests, 1);
+        assert!(
+            output.is_empty(),
+            "cancel conversion before encoding starts"
+        );
+
+        let bands = std::iter::from_fn(|| -> Option<Result<Vec<[f16; 4]>>> {
+            panic!("an already cancelled export must not request pixels")
+        });
+        assert!(
+            write_srgb8_jpeg_cancellable(
+                &mut output,
+                1,
+                1,
+                None,
+                JpegOptions::default(),
+                bands,
+                || true,
+            )
+            .is_err()
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn jpeg_dither_preserves_solid_backgrounds_and_clipped_black_and_white() {
+        for seed in [0, 42, u64::MAX] {
+            for index in 0..256 {
+                let background = [index as u8, (255 - index) as u8, (index / 2) as u8];
+                let linear = background.map(|c| srgb_to_linear(f32::from(c) / 255.0));
+                assert_eq!(
+                    jpeg_pixel(
+                        [f16::NAN, f16::INFINITY, f16::NEG_INFINITY, f16::ZERO],
+                        linear,
+                        Some(seed),
+                        index
+                    ),
+                    background,
+                );
+                for (value, expected) in [(-4.0, 0), (0.0, 0), (1.0, 255), (4.0, 255)] {
+                    assert_eq!(
+                        jpeg_pixel(
+                            [value, value, value, 1.0].map(f16::from_f32),
+                            linear,
+                            Some(seed),
+                            index
+                        ),
+                        [expected; 3]
+                    );
+                }
+            }
+        }
+        // Verify default dithering does not create AC detail in uniform JPEGs.
+        for (pixel, expected) in [
+            ([0.0, 0.0, 0.0, 0.0], 255),
+            ([1.0; 4], 255),
+            ([0.0, 0.0, 0.0, 1.0], 0),
+        ] {
+            let mut output = Vec::new();
+            write_srgb8_jpeg(
+                &mut output,
+                64,
+                64,
+                None,
+                JpegOptions::default(),
+                [Ok(vec![pixel.map(f16::from_f32); 64 * 64])],
+            )
+            .unwrap();
+            let rgb = image::load_from_memory(&output).unwrap().into_rgb8();
+            assert!(rgb.pixels().all(|p| p.0 == [expected; 3]));
+        }
+    }
+
+    #[test]
+    fn jpeg_nonfinite_rgb_quantizes_without_panicking() {
+        // A NaN input to f32::clamp propagates NaN; only invalid bounds panic.
+        // JPEG quantization maps NaN color to zero through Rust's saturating cast.
+        for alpha in [0.5, 1.0] {
+            let pixel = [f16::NAN, f16::NAN, f16::NAN, f16::from_f32(alpha)];
+            assert_eq!(jpeg_pixel(pixel, [1.0; 3], Some(0), 0), [0; 3]);
+            let mut output = Vec::new();
+            write_srgb8_jpeg(
+                &mut output,
+                8,
+                8,
+                None,
+                JpegOptions::default(),
+                [Ok(vec![pixel; 64])],
+            )
+            .unwrap();
+            let rgb = image::load_from_memory(&output).unwrap().into_rgb8();
+            assert!(rgb.pixels().all(|p| p.0 == [0; 3]));
+        }
     }
 
     #[test]

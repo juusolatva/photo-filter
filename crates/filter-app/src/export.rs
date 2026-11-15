@@ -224,13 +224,14 @@ fn export_image(
                 exif,
                 bands,
             )?,
-            ExportFormat::Jpeg(options) => filter_io::write_srgb8_jpeg(
+            ExportFormat::Jpeg(options) => filter_io::write_srgb8_jpeg_cancellable(
                 &mut output,
                 source.width(),
                 source.height(),
                 exif,
                 options,
                 bands,
+                || cancel.load(Ordering::Relaxed),
             )?,
         }
         output.flush()?;

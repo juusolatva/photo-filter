@@ -11,7 +11,9 @@ The background is converted to linear sRGB and composited with the rendered line
 before output transfer and quantization; a half-transparent black pixel over white is
 about 188/255. Zero-alpha pixels ignore hidden RGB. Colors outside the final
 sRGB gamut are clipped. JPEG uses seeded triangular dithering (±1 quantization step)
-by default; the checkbox disables it. Noise depends on pixel/channel index and seed,
+by default; the checkbox disables it. Exact 8-bit levels (within 0.0001 of a code step
+for floating-point transform error), including solid backgrounds and clipped black/white,
+are preserved without noise. Noise depends on pixel/channel index and seed,
 so changing tile or band boundaries does not change it. PNG retains 16-bit quantization
 without dithering. Gamut compression and other output color spaces remain pending.
 
@@ -19,8 +21,8 @@ Both formats stream GPU tiles into bounded row bands and publish the completed f
 atomically. Editing, changing export controls or opening another image does not change
 the source, settings or metadata of an active export. Progress reserves a final step for
 encoding and publication. Cancellation is checked between tiles, during GPU readback,
-and on buffered file writes during encoding. Failed/cancelled work leaves the destination
-intact and removes the temporary file. New files use normal creation permissions;
+at most every 4096 pixels during JPEG CPU conversion, and on buffered file writes
+during encoding. Failed/cancelled work leaves the destination intact and removes the temporary file. New files use normal creation permissions;
 replacements preserve existing Unix permission bits.
 
 PNG encoding streams without a full-image CPU output buffer. The explicit `image`
@@ -59,8 +61,10 @@ orientation normalization, output ICC, camera metadata preservation and source i
 The software-GPU basic-adjustment export regression also verifies EXIF in the tiled path.
 
 The `write_srgb8_jpeg` API accepts the same band layout and optional source EXIF with
-`JpegOptions` for quality, background and optional dither seed. The APP1 segment's 65535-byte
-length includes two length bytes and the six-byte `Exif\0\0` prefix, allowing **65527 raw
+`JpegOptions` for quality, background and optional dither seed.
+`write_srgb8_jpeg_cancellable` additionally accepts a cancellation predicate for CPU
+conversion; the app supplies its captured job flag and checks encoding writes as well.
+The APP1 segment's 65535-byte length includes two length bytes and the six-byte `Exif\0\0` prefix, allowing **65527 raw
 EXIF bytes**. Larger metadata fails before consuming any bands or writing output; it is
 never silently truncated or stripped. PNG retains its 16 MiB EXIF limit. Empty EXIF is
 omitted in both formats, and the shared strict validation/orientation normalization has
@@ -70,6 +74,7 @@ other source EXIF color-space/dimension/thumbnail descriptions remain unchanged.
 JPEG tests cover linear-light alpha flattening over a colored background, hidden color,
 quality-dependent compression, seeded/band-independent dithering, ICC and EXIF roundtrips
 in both byte orders and all eight orientation values, invalid input and APP1 limits,
-producer failures and cancellation during encoding. Software-GPU tests compare PNG/JPEG
-exports against captured CPU adjustments and check every output pixel of a >36MP image
+producer failures, cancellation within a single conversion band and during encoding,
+solid/clipped levels with dithering enabled, and non-finite RGB without panics.
+Software-GPU tests compare PNG/JPEG exports against captured CPU adjustments and check every output pixel of a >36MP image
 with a 2048px device texture limit (within JPEG's lossy tolerance).
