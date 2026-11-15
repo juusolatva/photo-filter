@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, ensure};
 use filter_core::cpu_eval::BasicAdjustments;
 use filter_gpu::{TilePlan, TiledExposure};
-use filter_io::DecodedImage;
+use filter_io::{DecodedImage, JpegOptions};
+use std::io::Write;
 use std::{
     path::PathBuf,
     sync::{
@@ -11,6 +12,48 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+#[derive(Clone, Copy, Debug)]
+pub enum ExportFormat {
+    Png,
+    Jpeg(JpegOptions),
+}
+impl ExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg(_) => "jpg",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Png => "16-bit PNG",
+            Self::Jpeg(_) => "JPEG",
+        }
+    }
+    fn validate_path(self, path: &std::path::Path) -> Result<()> {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default();
+        let valid = match self {
+            Self::Png => extension.eq_ignore_ascii_case("png"),
+            Self::Jpeg(_) => {
+                extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
+            }
+        };
+        ensure!(
+            valid,
+            "{} export requires a filename ending in {}",
+            self.label(),
+            match self {
+                Self::Png => ".png",
+                Self::Jpeg(_) => ".jpg or .jpeg",
+            }
+        );
+        Ok(())
+    }
+}
 
 pub enum ExportResult {
     Saved(PathBuf),
@@ -25,22 +68,24 @@ pub struct ExportJob {
     result: mpsc::Receiver<ExportResult>,
 }
 impl ExportJob {
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         device: wgpu::Device,
         queue: wgpu::Queue,
         source: Arc<DecodedImage>,
         adjustments: BasicAdjustments,
         path: PathBuf,
+        format: ExportFormat,
         ctx: eframe::egui::Context,
     ) -> Result<Self> {
-        validate_png_path(&path)?;
+        format.validate_path(&path)?;
         let plan = TilePlan::new(
             source.buffer.width(),
             source.buffer.height(),
             &device.limits(),
             1024,
         )?;
-        let total = plan.tile_count();
+        let total = plan.tile_count() + 1;
         let completed = Arc::new(AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, result) = mpsc::channel();
@@ -51,21 +96,25 @@ impl ExportJob {
             result,
         };
         std::thread::Builder::new()
-            .name("png-export".into())
+            .name("image-export".into())
             .spawn(move || {
-                let result = export_png(
+                let result = export_image(
                     &device,
                     &queue,
                     &source.buffer,
                     source.exif_bytes.as_deref(),
                     &adjustments,
                     &path,
+                    format,
                     plan,
                     &cancel,
                     &completed,
                 );
                 let message = match result {
-                    Ok(()) => ExportResult::Saved(path),
+                    Ok(()) => {
+                        completed.fetch_add(1, Ordering::Relaxed);
+                        ExportResult::Saved(path)
+                    }
                     Err(_) if cancel.load(Ordering::Relaxed) => ExportResult::Cancelled,
                     Err(error) => ExportResult::Failed(format!("{error:#}")),
                 };
@@ -101,13 +150,14 @@ impl Drop for ExportJob {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn export_png(
+fn export_image(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     source: &filter_core::ImageBuffer,
     exif: Option<&[u8]>,
     adjustments: &BasicAdjustments,
     path: &std::path::Path,
+    format: ExportFormat,
     plan: TilePlan,
     cancel: &AtomicBool,
     completed: &AtomicU64,
@@ -158,7 +208,34 @@ fn export_png(
         })())
     });
     publish_export(path, cancel, |file| {
-        filter_io::write_srgb16_png_with_exif(file, source.width(), source.height(), exif, bands)
+        // Buffer JPEG's small writes, checking cancellation throughout encoding too.
+        let mut output = std::io::BufWriter::with_capacity(
+            64 * 1024,
+            CancelWriter {
+                output: file,
+                cancel,
+            },
+        );
+        match format {
+            ExportFormat::Png => filter_io::write_srgb16_png_with_exif(
+                &mut output,
+                source.width(),
+                source.height(),
+                exif,
+                bands,
+            )?,
+            ExportFormat::Jpeg(options) => filter_io::write_srgb8_jpeg_cancellable(
+                &mut output,
+                source.width(),
+                source.height(),
+                exif,
+                options,
+                bands,
+                || cancel.load(Ordering::Relaxed),
+            )?,
+        }
+        output.flush()?;
+        Ok(())
     })
 }
 
@@ -218,14 +295,23 @@ fn publish_export(
     Ok(())
 }
 
-fn validate_png_path(path: &std::path::Path) -> Result<()> {
-    ensure!(
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("png")),
-        "PNG export requires a filename ending in .png"
-    );
-    Ok(())
+struct CancelWriter<'a, W> {
+    output: W,
+    cancel: &'a AtomicBool,
+}
+impl<W: Write> Write for CancelWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("Export cancelled"));
+        }
+        self.output.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("Export cancelled"));
+        }
+        self.output.flush()
+    }
 }
 
 #[cfg(test)]
@@ -234,11 +320,80 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn export_requires_png_extension_without_changing_selected_destination() {
-        assert!(validate_png_path(std::path::Path::new("photo.png")).is_ok());
-        assert!(validate_png_path(std::path::Path::new("photo.PNG")).is_ok());
-        assert!(validate_png_path(std::path::Path::new("photo.jpg")).is_err());
-        assert!(validate_png_path(std::path::Path::new("photo")).is_err());
+    fn export_requires_an_extension_matching_the_selected_format() {
+        assert!(
+            ExportFormat::Png
+                .validate_path(std::path::Path::new("photo.png"))
+                .is_ok()
+        );
+        assert!(
+            ExportFormat::Png
+                .validate_path(std::path::Path::new("photo.PNG"))
+                .is_ok()
+        );
+        assert!(
+            ExportFormat::Png
+                .validate_path(std::path::Path::new("photo.jpg"))
+                .is_err()
+        );
+        assert!(
+            ExportFormat::Png
+                .validate_path(std::path::Path::new("photo"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn jpeg_accepts_both_extensions_case_insensitively() {
+        let format = ExportFormat::Jpeg(JpegOptions::default());
+        for path in ["photo.jpg", "photo.JPEG", "photo.JPG", "photo.jpeg"] {
+            assert!(format.validate_path(std::path::Path::new(path)).is_ok());
+        }
+        for path in ["photo.png", "photo", "photo.webp"] {
+            assert!(format.validate_path(std::path::Path::new(path)).is_err());
+        }
+    }
+
+    #[test]
+    fn jpeg_cancellation_during_encoding_preserves_destination() {
+        struct CancelAfterWrite<'a> {
+            file: &'a mut std::fs::File,
+            cancel: &'a AtomicBool,
+        }
+        impl Write for CancelAfterWrite<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let written = self.file.write(bytes)?;
+                self.cancel.store(true, Ordering::Relaxed);
+                Ok(written)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.file.flush()
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("edited.jpg");
+        std::fs::write(&path, b"original").unwrap();
+        let cancel = AtomicBool::new(false);
+        let result = publish_export(&path, &cancel, |file| {
+            filter_io::write_srgb8_jpeg(
+                CancelWriter {
+                    output: CancelAfterWrite {
+                        file,
+                        cancel: &cancel,
+                    },
+                    cancel: &cancel,
+                },
+                17,
+                9,
+                None,
+                JpegOptions::default(),
+                [Ok(vec![[half::f16::ONE; 4]; 17 * 9])],
+            )
+        });
+        assert!(result.is_err());
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -319,7 +474,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a software GPU"]
-    fn png_export_renders_the_captured_basic_adjustments() {
+    fn png_and_jpeg_export_render_the_captured_basic_adjustments() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::PRIMARY,
@@ -378,13 +533,14 @@ mod tests {
             let exif = [
                 73, 73, 42, 0, 8, 0, 0, 0, 1, 0, 18, 1, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
             ];
-            export_png(
+            export_image(
                 &device,
                 &queue,
                 &image,
                 Some(&exif),
                 &snapshot,
                 &path,
+                ExportFormat::Png,
                 plan,
                 &AtomicBool::new(false),
                 &completed,
@@ -440,12 +596,75 @@ mod tests {
             }
             assert!(reader.next_row().unwrap().is_none());
             reader.finish().unwrap();
+            let jpeg_path = directory.path().join("adjusted.jpg");
+            let options = JpegOptions {
+                quality: 100,
+                background: [81, 142, 203],
+                dither_seed: None,
+            };
+            completed.store(0, Ordering::Relaxed);
+            export_image(
+                &device,
+                &queue,
+                &image,
+                Some(&exif),
+                &snapshot,
+                &jpeg_path,
+                ExportFormat::Jpeg(options),
+                TilePlan::new(w, h, &device.limits(), 17).unwrap(),
+                &AtomicBool::new(false),
+                &completed,
+            )
+            .unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), count);
+            let expected_path = directory.path().join("cpu.jpg");
+            let pixels = image
+                .pixels()
+                .iter()
+                .map(|pixel| {
+                    snapshot
+                        .pixel(pixel.map(half::f16::to_f32))
+                        .map(half::f16::from_f32)
+                })
+                .collect();
+            filter_io::write_srgb8_jpeg(
+                std::fs::File::create(&expected_path).unwrap(),
+                w,
+                h,
+                Some(&exif),
+                options,
+                [Ok(pixels)],
+            )
+            .unwrap();
+            let actual = filter_io::decode(&jpeg_path).unwrap();
+            assert_eq!((actual.buffer.width(), actual.buffer.height()), (w, h));
+            assert_eq!(actual.exif_bytes.as_deref(), Some(expected_exif.as_slice()));
+            assert!(actual.icc_profile.is_some());
+            assert!(
+                actual
+                    .buffer
+                    .pixels()
+                    .iter()
+                    .all(|p| p[3] == half::f16::ONE)
+            );
+            let actual_rgb = image::open(&jpeg_path).unwrap().into_rgb8();
+            let expected_rgb = image::open(&expected_path).unwrap().into_rgb8();
+            for (actual, expected) in actual_rgb.pixels().zip(expected_rgb.pixels()) {
+                for c in 0..3 {
+                    // Half-float CPU/GPU differences can cross RGB8 and DCT rounding
+                    // boundaries. Bound the decoded JPEG error in its 8-bit domain.
+                    assert!(
+                        (i16::from(actual[c]) - i16::from(expected[c])).abs() <= 4,
+                        "{actual:?} vs {expected:?}"
+                    );
+                }
+            }
         });
     }
 
     #[test]
-    #[ignore = "requires a software GPU and about 400 MiB RAM; exercises >36MP PNG export"]
-    fn large_png_export_exceeds_texture_and_full_readback_limits() {
+    #[ignore = "requires a software GPU and about 550 MiB RAM; exercises >36MP PNG/JPEG export"]
+    fn large_png_and_jpeg_export_exceeds_texture_and_full_readback_limits() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::PRIMARY,
@@ -495,13 +714,14 @@ mod tests {
             let plan = TilePlan::new(w, h, &device.limits(), 1024).unwrap();
             let total = plan.tile_count();
             let started = Instant::now();
-            export_png(
+            export_image(
                 &device,
                 &queue,
                 &source,
                 None,
                 &BasicAdjustments::exposure(1.0).unwrap(),
                 &path,
+                ExportFormat::Png,
                 plan,
                 &cancel,
                 &completed,
@@ -545,6 +765,57 @@ mod tests {
             }
             assert!(reader.next_row().unwrap().is_none());
             reader.finish().unwrap();
+            let jpeg_path = directory.path().join("large.jpg");
+            completed.store(0, Ordering::Relaxed);
+            let jpeg_started = Instant::now();
+            export_image(
+                &device,
+                &queue,
+                &source,
+                None,
+                &BasicAdjustments::exposure(1.0).unwrap(),
+                &jpeg_path,
+                ExportFormat::Jpeg(JpegOptions {
+                    quality: 100,
+                    dither_seed: None,
+                    ..Default::default()
+                }),
+                TilePlan::new(w, h, &device.limits(), 1024).unwrap(),
+                &cancel,
+                &completed,
+            )
+            .unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), total);
+            use image::ImageDecoder;
+            let mut decoder = image::codecs::jpeg::JpegDecoder::new(std::io::BufReader::new(
+                std::fs::File::open(&jpeg_path).unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(decoder.dimensions(), (w, h));
+            assert_eq!(decoder.color_type(), image::ColorType::Rgb8);
+            assert!(decoder.icc_profile().unwrap().is_some());
+            assert!(decoder.exif_metadata().unwrap().is_none());
+            let mut rgb = vec![0; decoder.total_bytes() as usize];
+            decoder.read_image(&mut rgb).unwrap();
+            for (i, actual) in rgb.as_chunks::<3>().0.iter().enumerate() {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                let level = levels[((x / 73 + y / 71) % 4) as usize] * 2.0;
+                let alpha = alphas[((x + y) % 4) as usize];
+                let expected = (filter_core::color::linear_to_srgb(level * alpha + 1.0 - alpha)
+                    * 255.0)
+                    .round() as i32;
+                for channel in actual {
+                    assert!(
+                        (i32::from(*channel) - expected).abs() <= 4,
+                        "JPEG pixel {x},{y}: {actual:?} vs {expected}"
+                    );
+                }
+            }
+            eprintln!(
+                "Validated {} JPEG pixels across {total} tiles in {:.2?}",
+                u64::from(w) * u64::from(h),
+                jpeg_started.elapsed()
+            );
             eprintln!(
                 "Validated {} pixels across {total} tiles in {:.2?}",
                 u64::from(w) * u64::from(h),
