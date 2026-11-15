@@ -43,8 +43,9 @@ Nondefault unsupported settings cause `BasicAdjustments::new` to return an error
 including nonidentity curves, clarity, detail, finishing, HSL/grading, channel
 mixer and supported-schema custom nodes. Disabled, zero-opacity, and unknown
 custom nodes are skipped. Unknown payloads remain in the original edit/preset.
-This compiler does not mutate them. The current UI exposes only implemented
-controls; preset file dialogs remain pending.
+This compiler does not mutate them. The current UI exposes implemented controls
+and [selective preset file save/load](presets.md#desktop-workflow). Applying
+unsupported selected effects leaves the current edit unchanged.
 
 ## Color and white balance
 

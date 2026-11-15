@@ -38,4 +38,4 @@ Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patc
 
 The workspace separates reusable image/color primitives (`filter-core`), device-sharing GPU rendering (`filter-gpu`), decoding and metadata (`filter-io`), and the desktop UI (`filter-app`). Neither the core, GPU, nor I/O crates depend on egui.
 
-Remaining Phase 0 work: large rotated/wide-gamut image performance checks and Linux/Windows desktop validation. Perceptual gamut mapping, display dithering, other export formats/settings and EXIF preservation, preset editing and additional filters are still pending. See [PLAN.md](PLAN.md) for the full roadmap.
+Remaining Phase 0 work: large rotated/wide-gamut image performance checks and Linux/Windows desktop validation. Perceptual gamut mapping, display dithering, other export formats/settings and EXIF preservation, a preset browser/thumbnails and additional filters are still pending. See [PLAN.md](PLAN.md) for the full roadmap.
