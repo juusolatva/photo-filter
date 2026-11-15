@@ -42,7 +42,9 @@ files), rejects directories/devices/pipes, and bounds both the file-size check a
 16 MiB before parsing. `write` validates and checks serialized size before
 writing a sibling temporary file, flushes it, and atomically publishes it.
 Validation or writing failure leaves an existing destination intact. Temporary
-files are removed on failure. File work and native dialogs run on workers; the
+files are removed on failure. The containing directory is not synced after the
+rename, so publication does not guarantee durability across system crashes or
+power loss. File work and native dialogs run on workers; the
 UI admits one dialog/preset file operation at a time. New files follow normal
 creation permissions/umask; replacements preserve existing Unix permission bits.
 Atomic replacement does not preserve ownership, filesystem ACLs or extended
