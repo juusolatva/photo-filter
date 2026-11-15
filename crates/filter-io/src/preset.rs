@@ -38,13 +38,37 @@ pub fn write(path: &Path, preset: &Preset) -> Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".photo-filter-preset-")
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".photo-filter-preset-");
+    #[cfg(unix)]
+    let existing_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = match std::fs::metadata(path) {
+            Ok(metadata) => Some(metadata.permissions().mode() & 0o777),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("Could not inspect preset destination"),
+        };
+        builder.permissions(std::fs::Permissions::from_mode(if mode.is_some() {
+            0o600
+        } else {
+            0o666
+        }));
+        mode
+    };
+    let mut temporary = builder
         .tempfile_in(parent)
         .context("Could not create preset temporary file")?;
     temporary
         .write_all(json.as_bytes())
         .context("Could not write preset")?;
+    #[cfg(unix)]
+    if let Some(mode) = existing_mode {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .context("Could not preserve preset destination permissions")?;
+    }
     temporary
         .as_file()
         .sync_all()
@@ -129,5 +153,27 @@ mod tests {
             "untouched"
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn new_files_follow_umask_and_replacements_preserve_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preset.json");
+        let reference = dir.path().join("normal.json");
+        File::create(&reference).unwrap();
+        let preset = Preset::capture("Test", &EditState::default(), &Sections::ALL).unwrap();
+        write(&path, &preset).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(reference).unwrap().permissions().mode() & 0o777
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write(&path, &preset).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
 }

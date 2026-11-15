@@ -124,7 +124,16 @@ impl PhotoApp {
         let _ = self.load_tx.send((self.generation, path));
     }
     fn load_preset(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
-        if self.dialog_open || self.loading || self.source.is_none() {
+        if self.dialog_open {
+            self.presets.status =
+                "Finish the current file operation before loading a preset.".into();
+            return;
+        }
+        if self.loading {
+            self.presets.status = "Wait for the image to finish loading.".into();
+            return;
+        }
+        if self.source.is_none() {
             self.presets.status = "Open an image before loading a preset.".into();
             return;
         }
@@ -225,15 +234,8 @@ impl eframe::App for PhotoApp {
             match result {
                 DialogResult::Open(Some(path)) => self.open(path),
                 DialogResult::PresetLoad { generation, result } => {
-                    if generation == self.generation {
-                        match result {
-                            Some(Ok(preset)) => self.presets.loaded(*preset),
-                            Some(Err(error)) => {
-                                self.presets.status = format!("Could not load preset: {error}")
-                            }
-                            None => self.presets.status = "Preset loading cancelled".into(),
-                        }
-                    }
+                    self.presets
+                        .finish_load(generation == self.generation, result);
                 }
                 DialogResult::PresetSave(result) => {
                     self.presets.status = match result {

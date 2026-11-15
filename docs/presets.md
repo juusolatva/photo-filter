@@ -29,7 +29,8 @@ The default filename is `edited.pfpreset.json`; the native dialog confirms
 replacement of an existing destination. Saving captures the current edit when
 the button is pressed, so subsequent editing or image replacement does not
 change the saved file. After applying a preset, saving initially selects its
-present sections and retains its ID, author and tags. Saving captures every
+present sections and retains its author and tags. Each save gets a fresh preset
+ID. Saving captures every
 field of each selected section, including neutral values; it does not reproduce
 the original sparse field patch. The custom stack is captured as a replacement
 snapshot, even if the imported preset appended nodes. Node IDs refresh on apply
@@ -41,8 +42,9 @@ unselected sections are intentionally omitted.
 writing a sibling temporary file, flushes it, and atomically publishes it.
 Validation or writing failure leaves an existing destination intact. Temporary
 files are removed on failure. File work and native dialogs run on workers; the
-UI admits one dialog/preset file operation at a time. Preset files use private
-temporary-file permissions. The library caller owns overwrite confirmation.
+UI admits one dialog/preset file operation at a time. New files follow normal
+creation permissions/umask; replacements preserve existing Unix permission bits.
+The library caller owns overwrite confirmation.
 
 The library continues to support stored effects that the current desktop
 renderer cannot execute. The OS preset library, search/tags editor, thumbnails,
