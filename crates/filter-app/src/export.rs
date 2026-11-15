@@ -299,6 +299,120 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a software GPU"]
+    fn png_export_renders_the_captured_basic_adjustments() {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::PRIMARY,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: true,
+                    ..Default::default()
+                })
+                .await
+                .expect("software adapter required");
+            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let (w, h) = (53, 11);
+            let image = filter_core::ImageBuffer::new(
+                w,
+                h,
+                (0..w * h)
+                    .map(|i| {
+                        let x = (i % w) as f32 / (w - 1) as f32;
+                        [
+                            x * 0.4 + 0.02,
+                            x * 0.2 + 0.1,
+                            0.3,
+                            [0.0, 0.25, 0.5, 1.0][i as usize % 4],
+                        ]
+                        .map(half::f16::from_f32)
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let mut edit = filter_core::edit::EditState::default();
+            edit.calibration.exposure = 0.4;
+            edit.calibration.temperature = 0.3;
+            edit.calibration.tint = -0.2;
+            edit.tone.brightness = 0.5;
+            edit.tone.contrast = 0.4;
+            edit.tone.highlights = -0.3;
+            edit.tone.shadows = 0.2;
+            edit.tone.whites = -0.1;
+            edit.tone.blacks = 0.15;
+            edit.color.scalars.vibrance = 0.5;
+            edit.color.scalars.saturation = 0.2;
+            let snapshot = BasicAdjustments::new(&edit).unwrap();
+            edit.calibration.exposure = -5.0;
+            assert_ne!(
+                snapshot.pixel([0.2; 4]),
+                BasicAdjustments::new(&edit).unwrap().pixel([0.2; 4])
+            );
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("adjusted.png");
+            let plan = TilePlan::new(w, h, &device.limits(), 17).unwrap();
+            let count = plan.tile_count();
+            let completed = AtomicU64::new(0);
+            export_png(
+                &device,
+                &queue,
+                &image,
+                &snapshot,
+                &path,
+                plan,
+                &AtomicBool::new(false),
+                &completed,
+            )
+            .unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), count);
+            let mut reader =
+                png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()))
+                    .read_info()
+                    .unwrap();
+            assert!(reader.info().icc_profile.is_some());
+            assert_eq!(
+                reader.output_color_type(),
+                (png::ColorType::Rgba, png::BitDepth::Sixteen)
+            );
+            for row in image.pixels().chunks_exact(w as usize) {
+                let actual = reader.next_row().unwrap().unwrap();
+                for (original, bytes) in row.iter().zip(actual.data().as_chunks::<8>().0) {
+                    // Match the renderer's half-float storage boundary before encoding.
+                    let working = snapshot
+                        .pixel(original.map(half::f16::to_f32))
+                        .map(|v| half::f16::from_f32(v).to_f32());
+                    let rgb = filter_core::color::rec2020_to_linear_srgb(
+                        working[..3].try_into().unwrap(),
+                    );
+                    let expected = rgb.map(|c| {
+                        (filter_core::color::linear_to_srgb(c).clamp(0.0, 1.0) * 65535.0).round()
+                            as i32
+                    });
+                    for c in 0..3 {
+                        let actual =
+                            i32::from(u16::from_be_bytes([bytes[c * 2], bytes[c * 2 + 1]]));
+                        assert!(
+                            // Half-float rounding can differ by one ULP across CPU/GPU.
+                            // Bound final sRGB error to less than half an 8-bit step.
+                            (actual - expected[c]).abs() <= 128,
+                            "{actual} != {}",
+                            expected[c]
+                        );
+                    }
+                    assert_eq!(
+                        u16::from_be_bytes([bytes[6], bytes[7]]),
+                        (working[3] * 65535.0).round() as u16
+                    );
+                }
+            }
+            assert!(reader.next_row().unwrap().is_none());
+            reader.finish().unwrap();
+        });
+    }
+
+    #[test]
     #[ignore = "requires a software GPU and about 400 MiB RAM; exercises >36MP PNG export"]
     fn large_png_export_exceeds_texture_and_full_readback_limits() {
         pollster::block_on(async {

@@ -1,9 +1,10 @@
 # Edit and preset model
 
 `filter-core` provides the initial Phase 1 model without GUI or GPU dependencies.
-The desktop app stores its exposure in `EditState`; preview and export currently
-render **exposure only**. Other stored parameters and custom nodes await their
-engine stages. The app has no preset open/save controls yet.
+The desktop app stores its adjustments in `EditState`; preview and export render
+calibration, basic tone, vibrance and saturation. Other stored parameters and
+custom nodes await their engine stages. The app has no preset open/save controls
+yet. See [the pointwise renderer](pointwise.md).
 
 ## API
 
@@ -70,8 +71,9 @@ presets.
 
 Curves contain 2–1024 finite points with strictly increasing x coordinates and
 x endpoints 0 and 1. Their y coordinates can extend beyond [0, 1]. Exposure must
-be within −5 to +5 EV. Other scalar parameters must be finite; their control
-ranges and algorithms will be established with the engine work.
+be within −5 to +5 EV. Temperature/tint, brightness, contrast, highlights/shadows, whites/blacks,
+vibrance and saturation must be within −1 to +1. Other scalar parameters must be
+finite; their ranges and algorithms await subsequent engine work.
 
 Color JSON flattens scalar fields inside `color`. `hsl`, when present, contains
 eight entries in red/orange/yellow/green/aqua/blue/purple/magenta order. `grading`
