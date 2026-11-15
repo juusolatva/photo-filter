@@ -53,7 +53,7 @@ impl KnownOp {
     pub fn scale(&self) -> ScaleClass {
         match self {
             Self::FilmGrain { .. } => ScaleClass::Pixel,
-            _ => ScaleClass::Pointwise,
+            Self::Levels { .. } | Self::ColorMatrix3x3 { .. } => ScaleClass::Pointwise,
         }
     }
     fn validate(&self) -> Result<(), ModelError> {

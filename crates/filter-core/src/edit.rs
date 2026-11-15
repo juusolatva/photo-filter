@@ -30,8 +30,10 @@ impl TryFrom<u32> for ProcessVersion {
     }
 }
 impl From<ProcessVersion> for u32 {
-    fn from(_: ProcessVersion) -> Self {
-        1
+    fn from(version: ProcessVersion) -> Self {
+        match version {
+            ProcessVersion::V1 => 1,
+        }
     }
 }
 

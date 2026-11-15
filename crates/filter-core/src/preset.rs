@@ -113,8 +113,10 @@ impl TryFrom<u32> for SchemaVersion {
     }
 }
 impl From<SchemaVersion> for u32 {
-    fn from(_: SchemaVersion) -> Self {
-        1
+    fn from(version: SchemaVersion) -> Self {
+        match version {
+            SchemaVersion::V1 => 1,
+        }
     }
 }
 

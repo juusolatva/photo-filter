@@ -301,3 +301,53 @@ fn capture_full_preset_restores_all_parameters_except_node_identity() {
     edit.custom_stack[0].id = restored.custom_stack[0].id;
     assert_eq!(restored, edit);
 }
+
+#[test]
+fn known_pointwise_nodes_validate_and_preserve_matrix_values() {
+    let mut raw: Value = serde_json::from_str(PARTIAL).unwrap();
+    let op = json!({"type":"ColorMatrix3x3", "matrix":[[1.2,-0.2,0.],[0.,1.,0.],[0.,0.,1.]], "bias":[-0.1,0.,0.1]});
+    raw["patch"]["custom_stack"][0]["op"] = op.clone();
+    let preset = Preset::from_json(&raw.to_string()).unwrap();
+    let FilterOp::Known(known) = &preset.patch.custom_stack.as_ref().unwrap()[0].op else {
+        panic!("expected known matrix")
+    };
+    assert_eq!(known.scale(), ScaleClass::Pointwise);
+    assert_eq!(serde_json::to_value(known).unwrap()["type"], op["type"]);
+    assert_eq!(
+        Preset::from_json(&preset.to_json().unwrap()).unwrap(),
+        preset
+    );
+    raw["patch"]["custom_stack"][0]["op"] = json!({"type":"Levels", "in_black":0., "gamma":0., "in_white":1., "out_black":0., "out_white":1.});
+    assert!(Preset::from_json(&raw.to_string()).is_err());
+    raw["patch"]["custom_stack"][0]["op"]["gamma"] = json!(1.);
+    let preset = Preset::from_json(&raw.to_string()).unwrap();
+    assert_eq!(
+        Preset::from_json(&preset.to_json().unwrap()).unwrap(),
+        preset
+    );
+    raw["patch"]["custom_stack"][0]["op"]["in_white"] = json!(0.);
+    assert!(Preset::from_json(&raw.to_string()).is_err());
+}
+
+#[test]
+fn invalid_stack_rolls_back_scalar_changes_and_existing_node_ids() {
+    let preset = Preset::from_json(PARTIAL).unwrap();
+    let mut edit = EditState::default();
+    preset.apply_to(&mut edit, &Sections::ALL).unwrap();
+    let before = edit.clone();
+    let mut invalid = preset.patch.clone();
+    invalid.calibration.as_mut().unwrap().exposure = Some(2.0);
+    invalid.custom_stack.as_mut().unwrap()[0].opacity = -0.1;
+    for mode in [StackMode::Replace, StackMode::Append] {
+        invalid.custom_stack_mode = mode;
+        assert!(edit.apply(&invalid, &Sections::ALL).is_err());
+        assert_eq!(edit, before);
+    }
+    edit.color.scalars.monochrome = true;
+    edit.apply(
+        &patch(json!({"color":{"monochrome":false}})),
+        &Sections::ALL,
+    )
+    .unwrap();
+    assert!(!edit.color.scalars.monochrome);
+}

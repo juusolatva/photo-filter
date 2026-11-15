@@ -1,6 +1,6 @@
 # Photo Filter Studio
 
-A native Rust photo editor for Linux and Windows, currently implementing [Phase 0](PLAN.md#phase-0-workspace-bootstrap-minimal-viewer--gpu-integration-spike).
+A native Rust photo editor for Linux and Windows, with a Phase 0 viewer/export spike and the first Phase 1 data-model slice from [the implementation plan](PLAN.md).
 
 Implemented: background JPEG/PNG/WebP/TIFF loading, EXIF orientation, embedded ICC conversion to straight linear Rec.2020 in half-float storage, alpha-aware 2048px proxies, and a GPU exposure viewport with fit, pan and pointer-centered zoom. Opening another image discards stale decode results. Images exceeding the initial per-image 2 GiB estimated working budget are rejected with an error. Input files are capped at 512 MiB, and retained ICC/EXIF metadata at 16 MiB each; decoder limits also apply. These are allocation guards, not a hard process memory limit. Tagged grayscale profiles are converted using their original single-channel layout.
 
@@ -29,6 +29,8 @@ cargo test -p filter-app --locked large_png_export -- --ignored --nocapture
 ```
 
 GPU tests check viewport sRGB output, tiled-vs-untiled exposure, CPU parity, straight alpha, HDR/negative working values, and unaligned edge tiles. The large export test processes a 6101 × 6001 image (36,612,101 pixels) with a granted 2048px texture limit and 256 MiB buffer limit, then checks every decoded PNG pixel. Both dimensions exceed the texture limit, and a full-image readback would exceed the buffer limit. Ordinary workspace tests cover tile planning, output depth/profile/alpha, stream errors, and failure-safe file publication. The app and tiled tests only poll without waiting; the original viewport test's blocking device poll is confined to that test.
+
+The first Phase 1 slice adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, and unknown-node preservation in `filter-core`. The app now uses `EditState` for exposure; preset dialogs and rendering of additional parameters remain pending. See [the model and preset contract](docs/presets.md).
 
 The workspace separates reusable image/color primitives (`filter-core`), device-sharing GPU rendering (`filter-gpu`), decoding and metadata (`filter-io`), and the desktop UI (`filter-app`). Neither the core, GPU, nor I/O crates depend on egui.
 
