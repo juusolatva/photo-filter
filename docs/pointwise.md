@@ -113,9 +113,9 @@ The viewport unpremultiplies its alpha-weighted source texture before these
 operations, then composites clipped output RGB over its checkerboard. Both
 hardware-sRGB and manually encoded targets are tested. Tiles use straight alpha
 throughout. Output still uses the existing sRGB conversion and clipping; soft
-gamut compression and display dithering remain pending. JPEG export adds seeded
-8-bit dithering and linear-light alpha flattening; see [the export contract](export.md). Half-float GPU texture storage
-also limits retained precision and range; this is not an HDR file exporter.
+gamut compression and display dithering remain pending. PNG8 and JPEG export add seeded
+8-bit RGB dithering; JPEG also adds linear-light alpha flattening. See
+[the export contract](export.md). Half-float GPU texture storage also limits retained precision and range; this is not an HDR file exporter.
 
 Ordinary tests cover color references, extended-range round trips, CAT16 white
 chromaticity, exact neutral/exposure behavior, perceptual control behavior and

@@ -14,9 +14,10 @@ Use **Open image**, **Ctrl+O**, or drag a file onto the window. Drag to pan, scr
 Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
 
 Choose **PNG** or **JPEG** under **Format**, then **Export…** to save the full-resolution
-image with a snapshot of the current adjustments and export settings. PNG produces 16-bit
-sRGB with straight alpha (`.png`). JPEG produces 8-bit sRGB (`.jpg`/`.jpeg`), with quality
-1–100 (default 90), a selectable background (default white) for linear-light alpha
+image with a snapshot of the current adjustments and export settings. PNG offers 8-bit or
+16-bit sRGB with straight alpha (`.png`, default 16-bit). Eight-bit PNG includes optional
+seeded RGB dithering; alpha uses nearest rounding without noise. JPEG produces 8-bit
+sRGB (`.jpg`/`.jpeg`), with quality 1–100 (default 90), a selectable background (default white) for linear-light alpha
 flattening, and optional seeded dithering that preserves solid 8-bit levels and clipped
 black/white. Both embed an output sRGB ICC profile and validate nonempty source EXIF,
 preserving it with recognized orientation reset to `1`.
@@ -24,7 +25,7 @@ Malformed or oversized EXIF fails without replacing the destination; empty EXIF 
 JPEG EXIF is limited to 65527 bytes. See [the export contract](docs/export.md) for metadata
 limitations. Colors outside sRGB are clipped. Editing or opening another image can continue
 during export; **Cancel export** stops the captured job. Failure or cancellation before
-publication leaves an existing destination untouched. JPEG cancellation is checked within
+publication leaves an existing destination untouched. PNG/JPEG cancellation is checked within
 CPU conversion bands as well as rendering and encoding. New exports use normal creation
 permissions; replacements preserve existing Unix permission bits.
 
@@ -45,7 +46,7 @@ cargo test -p filter-app --locked png_and_jpeg_export_render -- --ignored
 cargo test -p filter-app --locked large_png_and_jpeg_export -- --ignored --nocapture
 ```
 
-GPU tests check both sRGB viewport paths and alpha compositing, CPU/GPU parity across all basic controls, tiled-vs-untiled output, straight alpha, HDR/negative working values, and unaligned edge tiles. An additional app test checks PNG and JPEG output against a captured basic-adjustment snapshot. The large export test processes a 6101 × 6001 image (36,612,101 pixels) with a granted 2048px texture limit and 256 MiB buffer limit, then checks every decoded PNG and JPEG pixel (with a lossy tolerance for JPEG). Both dimensions exceed the texture limit, and a full-image readback would exceed the buffer limit. Ordinary workspace tests cover tile planning, output depth/profile/alpha, EXIF preservation and export/reload across all eight orientations for PNG/JPEG/WebP sources in both byte orders, JPEG quality, linear-light flattening and seeded dithering, stream errors, and failure-safe file publication/cancellation. The app/export path polls without blocking. GPU parity and viewport test harnesses use bounded blocking polls for deterministic readback.
+GPU tests check both sRGB viewport paths and alpha compositing, CPU/GPU parity across all basic controls, tiled-vs-untiled output, straight alpha, HDR/negative working values, and unaligned edge tiles. An additional app test checks PNG and JPEG output against a captured basic-adjustment snapshot. The large export test processes a 6101 × 6001 image (36,612,101 pixels) with a granted 2048px texture limit and 256 MiB buffer limit, then checks every decoded 8-bit PNG, 16-bit PNG and JPEG pixel (with a lossy tolerance for JPEG). Both dimensions exceed the texture limit, and a full-image readback would exceed the buffer limit. Ordinary workspace tests cover tile planning, output depth/profile/alpha, EXIF preservation and export/reload across all eight orientations for PNG/JPEG/WebP sources in both byte orders, PNG bit depth, straight alpha and seeded dithering, JPEG quality and linear-light flattening, stream errors, and failure-safe file publication/cancellation. The app/export path polls without blocking. GPU parity and viewport test harnesses use bounded blocking polls for deterministic readback.
 
 Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Rendering of curves, detail, grading and custom nodes remains pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
 

@@ -58,6 +58,7 @@ pub struct PhotoApp {
     export_status: String,
     export_jpeg: bool,
     jpeg_options: filter_io::JpegOptions,
+    png_options: filter_io::PngOptions,
 }
 impl PhotoApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
@@ -111,6 +112,7 @@ impl PhotoApp {
             export_status: String::new(),
             export_jpeg: false,
             jpeg_options: filter_io::JpegOptions::default(),
+            png_options: filter_io::PngOptions::default(),
         };
         if let Some(path) = path {
             app.open(path);
@@ -216,14 +218,14 @@ impl PhotoApp {
         let format = if self.export_jpeg {
             ExportFormat::Jpeg(self.jpeg_options)
         } else {
-            ExportFormat::Png
+            ExportFormat::Png(self.png_options)
         };
         self.dialog_open = true;
         let tx = self.dialog_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let extensions: &[&str] = match format {
-                ExportFormat::Png => &["png"],
+                ExportFormat::Png(_) => &["png"],
                 ExportFormat::Jpeg(_) => &["jpg", "jpeg"],
             };
             let path = rfd::FileDialog::new()
@@ -429,7 +431,26 @@ impl eframe::App for PhotoApp {
                         }
                         ui.label("Full resolution · 8-bit sRGB · flattened alpha");
                     } else {
-                        ui.label("Full resolution · 16-bit sRGB · preserves alpha");
+                        ui.horizontal(|ui| {
+                            ui.label("Bit depth");
+                            ui.selectable_value(
+                                &mut self.png_options.bit_depth,
+                                filter_io::PngBitDepth::Eight,
+                                "8-bit",
+                            );
+                            ui.selectable_value(
+                                &mut self.png_options.bit_depth,
+                                filter_io::PngBitDepth::Sixteen,
+                                "16-bit",
+                            );
+                        });
+                        if self.png_options.bit_depth == filter_io::PngBitDepth::Eight {
+                            let mut dither = self.png_options.dither_seed.is_some();
+                            if ui.checkbox(&mut dither, "Dither 8-bit output").changed() {
+                                self.png_options.dither_seed = dither.then_some(0);
+                            }
+                        }
+                        ui.label("Full resolution · sRGB · preserves alpha");
                     }
                     if ui
                         .add_enabled(

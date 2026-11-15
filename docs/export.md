@@ -1,8 +1,8 @@
 # Image export and metadata
 
 Desktop export renders the captured source and basic adjustments at full resolution.
-Choose PNG for 16-bit sRGB RGBA with straight alpha, or JPEG for 8-bit sRGB RGB with
-quality 1–100 (default 90). Both embed an output sRGB ICC profile and retain validated
+Choose PNG for 8-bit or 16-bit sRGB RGBA with straight alpha (default 16-bit),
+or JPEG for 8-bit sRGB RGB with quality 1–100 (default 90). Both embed an output sRGB ICC profile and retain validated
 source EXIF. The chosen format must match the filename: `.png` or `.jpg`/`.jpeg`,
 case insensitive. The native save dialog confirms existing destinations.
 
@@ -10,20 +10,23 @@ JPEG composites straight alpha against a user-selectable sRGB background (defaul
 The background is converted to linear sRGB and composited with the rendered linear RGB
 before output transfer and quantization; a half-transparent black pixel over white is
 about 188/255. Zero-alpha pixels ignore hidden RGB. Colors outside the final
-sRGB gamut are clipped. JPEG uses seeded triangular dithering (±1 quantization step)
-by default; the checkbox disables it. Exact 8-bit levels (within 0.0001 of a code step
-for floating-point transform error), including solid backgrounds and clipped black/white,
+sRGB gamut are clipped. Eight-bit PNG RGB and JPEG use seeded triangular dithering
+(±1 quantization step) by default; each format has a checkbox to disable it. PNG alpha uses nearest rounding
+without dithering, preserving transparency independently of the noise seed. PNG stores
+straight color, including hidden RGB at zero alpha, without compositing. Exact 8-bit
+levels (within 0.0001 of a code step for floating-point transform error), including solid backgrounds and clipped black/white,
 are preserved without noise. Noise depends on pixel/channel index and seed,
-so changing tile or band boundaries does not change it. PNG retains 16-bit quantization
+so changing tile or band boundaries does not change it. Sixteen-bit PNG always quantizes
 without dithering. Gamut compression and other output color spaces remain pending.
 
 Both formats stream GPU tiles into bounded row bands and publish the completed file
 atomically. Editing, changing export controls or opening another image does not change
 the source, settings or metadata of an active export. Progress reserves a final step for
 encoding and publication. Cancellation is checked between tiles, during GPU readback,
-at most every 4096 pixels during JPEG CPU conversion, and on buffered file writes
-during encoding. Failed/cancelled work leaves the destination intact and removes the temporary file. New files use normal creation permissions;
-replacements preserve existing Unix permission bits.
+at most every 4096 pixels during PNG/JPEG CPU conversion, and on buffered file writes
+during encoding. Failed/cancelled work leaves the destination intact and removes the
+temporary file. New files use normal creation permissions; replacements preserve existing
+Unix permission bits.
 
 PNG encoding streams without a full-image CPU output buffer. The explicit `image`
 JPEG encoder uses an RGB8 CPU buffer (3 bytes per pixel) in addition to the current
@@ -45,15 +48,16 @@ left unchanged, matching the decoder's interpretation. No EXIF is synthesized wh
 is available; the current TIFF decoder does not expose source EXIF. XMP and other metadata
 outside the retained EXIF payload are not copied.
 
-The `filter-io` API `write_srgb16_png_with_exif` accepts optional raw EXIF from
-`image::ImageDecoder` and pixels that are already oriented. EXIF is limited to 16 MiB,
+The `filter-io` API `write_srgb_png` accepts `PngOptions` (channel depth and optional
+dither seed), optional raw EXIF from `image::ImageDecoder`, and already oriented pixels. EXIF is limited to 16 MiB,
 matching the import limit; oversized metadata fails before writing the PNG header.
 Empty EXIF is omitted. Nonempty EXIF is checked with the strict `kamadak-exif`
 reader before any PNG bytes are written. Malformed headers, directories or value
 offsets fail export with an `Invalid source EXIF metadata` error, leaving an existing
 destination untouched. Structurally valid metadata with missing or unrecognized
 orientation is retained.
-`write_srgb16_png` remains available for callers that do not need EXIF.
+`write_srgb_png_cancellable` also accepts a cancellation predicate. The existing
+`write_srgb16_png_with_exif` and `write_srgb16_png` APIs retain their 16-bit, undithered behavior.
 
 Workspace tests export and reload PNG/JPEG/WebP sources with each of the eight EXIF
 orientations and both byte orders. They check pixel positions and values, dimensions,
@@ -76,5 +80,9 @@ quality-dependent compression, seeded/band-independent dithering, ICC and EXIF r
 in both byte orders and all eight orientation values, invalid input and APP1 limits,
 producer failures, cancellation within a single conversion band and during encoding,
 solid/clipped levels with dithering enabled, and non-finite RGB without panics.
-Software-GPU tests compare PNG/JPEG exports against captured CPU adjustments and check every output pixel of a >36MP image
+PNG tests cover both depths, straight alpha and hidden color, seeded/band-independent
+dithering with unchanged alpha, undithered 16-bit output, clipping/non-finite values,
+metadata roundtrips and cancellation during conversion and encoding. Software-GPU tests
+compare both PNG depths and JPEG against captured CPU adjustments, check that different
+tile sizes produce identical PNG8 pixels, and check every output pixel of a >36MP image
 with a 2048px device texture limit (within JPEG's lossy tolerance).

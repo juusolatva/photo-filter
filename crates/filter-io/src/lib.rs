@@ -9,8 +9,8 @@ use std::path::Path;
 mod export;
 pub mod preset;
 pub use export::{
-    JpegOptions, write_srgb8_jpeg, write_srgb8_jpeg_cancellable, write_srgb16_png,
-    write_srgb16_png_with_exif,
+    JpegOptions, PngBitDepth, PngOptions, write_srgb_png, write_srgb_png_cancellable,
+    write_srgb8_jpeg, write_srgb8_jpeg_cancellable, write_srgb16_png, write_srgb16_png_with_exif,
 };
 
 pub struct DecodedImage {
