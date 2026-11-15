@@ -102,6 +102,7 @@ impl TiledExposure {
 
     /// Uploads only this tile, submits one pass and starts map_async. Does not poll or wait.
     /// Keep at most one pending tile per export to bound GPU/staging memory.
+    /// Returns an error for non-finite EV or values outside [-5, 5], matching EditState.
     pub fn submit(
         &self,
         device: &wgpu::Device,

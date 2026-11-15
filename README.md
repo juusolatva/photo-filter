@@ -9,7 +9,7 @@ cargo run -p filter-app -- path/to/photo.jpg
 cargo run -p filter-app -- --software-gpu path/to/photo.png
 ```
 
-Use **Open image**, **Ctrl+O**, or drag a file onto the window. Drag to pan, scroll to zoom, and select **Fit** to reset the view. Exposure ranges from −5 to +5 EV. Relative temperature/tint, brightness, contrast, highlights/shadows, whites/blacks, vibrance and saturation range from −1 to +1. All edits leave the source untouched; **Reset adjustments** returns to neutral. Zoom currently samples the proxy; true full-resolution regions arrive in Phase 2.
+Use **Open image**, **Ctrl+O**, or drag a file onto the window. Drag to pan, scroll to zoom, and select **Fit** to reset the view. Exposure ranges from −5 to +5 EV. Relative temperature/tint, brightness, contrast, highlights/shadows, whites/blacks, vibrance and saturation range from −1 to +1. All edits leave the source untouched; **Reset adjustments** returns these controls to neutral while preserving other edit sections. Zoom currently samples the proxy; true full-resolution regions arrive in Phase 2.
 
 **Export PNG…** saves the full-resolution image with the adjustments selected when the button was pressed. Choose a filename ending in `.png`. It produces a 16-bit sRGB PNG with straight alpha and an embedded sRGB ICC profile. Orientation is baked into the pixels; camera/EXIF metadata is omitted in this initial export. Colors outside sRGB are clipped, matching the initial viewport. Editing or opening another image can continue during export; **Cancel export** stops the captured job. Failure or cancellation before publication leaves an existing destination untouched. New exports use normal file-creation permissions; replacements preserve existing Unix permission bits.
 

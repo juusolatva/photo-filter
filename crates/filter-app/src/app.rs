@@ -1,7 +1,11 @@
 use crate::export::{ExportJob, ExportResult};
 use crate::preview::PreviewCallback;
 use eframe::egui;
-use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments, edit::EditState};
+use filter_core::{
+    ImageBuffer,
+    cpu_eval::BasicAdjustments,
+    edit::{EditState, ModelError},
+};
 use filter_gpu::{ExposureRenderer, SourceTexture};
 use filter_io::DecodedImage;
 use std::{
@@ -38,6 +42,7 @@ pub struct PhotoApp {
     loading: bool,
     status: String,
     edit: EditState,
+    adjustments: Result<BasicAdjustments, ModelError>,
     zoom: f32,
     pan: egui::Vec2,
     export: Option<ExportJob>,
@@ -87,6 +92,7 @@ impl PhotoApp {
             loading: false,
             status: "Open a JPEG, PNG, WebP or TIFF to begin".into(),
             edit: EditState::default(),
+            adjustments: Ok(BasicAdjustments::default()),
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             export: None,
@@ -96,6 +102,11 @@ impl PhotoApp {
             app.open(path);
         }
         app
+    }
+    /// Future preset loading must use this boundary to refresh or reject its snapshot.
+    fn replace_edit(&mut self, edit: EditState) {
+        self.adjustments = BasicAdjustments::new(&edit);
+        self.edit = edit;
     }
     fn open(&mut self, path: PathBuf) {
         self.generation += 1;
@@ -125,8 +136,14 @@ impl PhotoApp {
         let Some(source) = self.source.clone() else {
             return;
         };
+        let adjustments = match &self.adjustments {
+            Ok(settings) => settings.clone(),
+            Err(error) => {
+                self.export_status = format!("Cannot export these adjustments: {error}");
+                return;
+            }
+        };
         self.dialog_open = true;
-        let adjustments = BasicAdjustments::new(&self.edit).expect("valid UI edit");
         let tx = self.dialog_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -201,7 +218,7 @@ impl eframe::App for PhotoApp {
                         proxy.height()
                     );
                     self.source = Some(source);
-                    self.edit = EditState::default();
+                    self.replace_edit(EditState::default());
                     self.zoom = 1.0;
                     self.pan = egui::Vec2::ZERO;
                 }
@@ -241,16 +258,19 @@ impl eframe::App for PhotoApp {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.label(&self.status);
         });
+        let mut adjustments_changed = false;
         egui::Panel::right("adjustments")
             .default_size(220.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.heading("Basic adjustments");
                     ui.add_enabled_ui(self.source.is_some(), |ui| {
-                        ui.add(
-                            egui::Slider::new(&mut self.edit.calibration.exposure, -5.0..=5.0)
-                                .text("Exposure EV"),
-                        );
+                        adjustments_changed |= ui
+                            .add(
+                                egui::Slider::new(&mut self.edit.calibration.exposure, -5.0..=5.0)
+                                    .text("Exposure EV"),
+                            )
+                            .changed();
                         for (label, value) in [
                             ("Temperature", &mut self.edit.calibration.temperature),
                             ("Tint", &mut self.edit.calibration.tint),
@@ -263,16 +283,25 @@ impl eframe::App for PhotoApp {
                             ("Vibrance", &mut self.edit.color.scalars.vibrance),
                             ("Saturation", &mut self.edit.color.scalars.saturation),
                         ] {
-                            ui.add(egui::Slider::new(value, -1.0..=1.0).text(label));
+                            adjustments_changed |= ui
+                                .add(egui::Slider::new(value, -1.0..=1.0).text(label))
+                                .changed();
                         }
                         if ui.button("Reset adjustments").clicked() {
-                            self.edit = EditState::default();
+                            self.edit.reset_basic();
+                            adjustments_changed = true;
                         }
                     });
+                    if adjustments_changed {
+                        self.adjustments = BasicAdjustments::new(&self.edit);
+                    }
                     ui.separator();
                     if ui
                         .add_enabled(
-                            self.source.is_some() && !self.dialog_open && self.export.is_none(),
+                            self.source.is_some()
+                                && self.adjustments.is_ok()
+                                && !self.dialog_open
+                                && self.export.is_none(),
                             egui::Button::new("Export PNG…"),
                         )
                         .clicked()
@@ -296,6 +325,12 @@ impl eframe::App for PhotoApp {
                             ui.label("Cancelling…");
                         }
                     }
+                    if let Err(error) = &self.adjustments {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            format!("Cannot preview these adjustments: {error}"),
+                        );
+                    }
                     if !self.export_status.is_empty() {
                         ui.label(&self.export_status);
                     }
@@ -305,7 +340,9 @@ impl eframe::App for PhotoApp {
             let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
             ui.painter()
                 .rect_filled(rect, 0.0, egui::Color32::from_gray(24));
-            if let (Some(source), Some(texture)) = (&self.source, &self.texture) {
+            if let (Some(source), Some(texture), Ok(adjustments)) =
+                (&self.source, &self.texture, &self.adjustments)
+            {
                 let dims = egui::vec2(source.buffer.width() as f32, source.buffer.height() as f32);
                 let fit = (rect.width() / dims.x).min(rect.height() / dims.y);
                 if response.dragged() {
@@ -333,7 +370,7 @@ impl eframe::App for PhotoApp {
                         frame: self.renderer.frame_region_adjusted(
                             &rs.device,
                             texture,
-                            &BasicAdjustments::new(&self.edit).expect("valid UI edit"),
+                            adjustments,
                             [origin.x, origin.y, extent.x, extent.y],
                         ),
                     };
@@ -345,7 +382,11 @@ impl eframe::App for PhotoApp {
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "Drop an image here",
+                    if self.source.is_some() {
+                        "Adjustments cannot be previewed"
+                    } else {
+                        "Drop an image here"
+                    },
                     egui::FontId::proportional(22.0),
                     egui::Color32::GRAY,
                 );

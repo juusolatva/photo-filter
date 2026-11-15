@@ -69,7 +69,7 @@ impl BasicAdjustments {
             ],
         })
     }
-    /// Compatibility helper for the original exposure-only API.
+    /// Exposure-only snapshot. Like EditState, accepts finite EV in [-5, 5].
     pub fn exposure(ev: f32) -> Result<Self, ModelError> {
         let mut edit = EditState::default();
         edit.calibration.exposure = ev;

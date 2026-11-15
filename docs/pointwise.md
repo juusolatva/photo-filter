@@ -4,6 +4,9 @@ The desktop app renders Exposure, relative Temperature/Tint, Brightness, Contras
 Highlights/Shadows, Whites/Blacks, Vibrance and Saturation. The controls leave the
 source untouched and feed both the proxy viewport and full-resolution PNG export.
 The export captures the source and adjustments when its save dialog opens.
+Snapshots are rebuilt only when edits change. Unsupported or invalid edits show
+a diagnostic and disable export without panicking or showing a stale preview.
+Reset clears the visible basic controls and preserves other edit sections.
 
 `filter-gpu/src/working.wgsl` is the canonical pixel implementation, included by
 both viewport and tile shaders. `filter-core::cpu_eval::BasicAdjustments` compiles
@@ -11,7 +14,10 @@ an immutable validated snapshot and provides `pixel` and rayon-backed `apply` fo
 CPU probes, future LUT baking and parity tests. GPU matrices and scalar uniforms
 come from that same snapshot. The existing `ExposureRenderer` / `TiledExposure`
 type names and exposure-only methods remain available; the new
-`frame_region_adjusted` / `submit_adjusted` methods accept the full snapshot.
+`frame_region_adjusted` / `submit_adjusted` methods accept the full snapshot. Exposure-only methods now enforce the same
+finite −5…+5 EV contract as `EditState`: tile submission returns an error outside
+that range, while viewport helpers panic (documented in their API). Validate
+untrusted input with `BasicAdjustments::exposure` before rendering.
 
 ```rust
 use filter_core::{cpu_eval::BasicAdjustments, edit::EditState};

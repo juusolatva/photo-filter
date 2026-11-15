@@ -152,10 +152,18 @@ impl ExposureRenderer {
             view: texture.create_view(&Default::default()),
         }
     }
+    /// Exposure-only viewport, with the same [-5, 5] EV contract as EditState.
+    ///
+    /// # Panics
+    /// Panics if EV is non-finite or outside [-5, 5]. Use a validated
+    /// BasicAdjustments snapshot with frame_region_adjusted for fallible inputs.
     pub fn frame(&self, device: &wgpu::Device, source: &SourceTexture, ev: f32) -> ExposureFrame {
         self.frame_region(device, source, ev, [0.0, 0.0, 1.0, 1.0])
     }
     /// UV origin and extent for the visible part of a panned/zoomed image.
+    ///
+    /// # Panics
+    /// Panics if EV is non-finite or outside [-5, 5].
     pub fn frame_region(
         &self,
         device: &wgpu::Device,

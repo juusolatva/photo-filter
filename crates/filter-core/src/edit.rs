@@ -343,6 +343,18 @@ impl<'de> Deserialize<'de> for EditState {
     }
 }
 impl EditState {
+    /// Reset only the controls currently exposed by the basic-adjustment panel.
+    /// Preserve curves, clarity, grading, detail, finishing and custom nodes.
+    pub fn reset_basic(&mut self) {
+        self.calibration = Calibration::default();
+        self.tone = Tone {
+            clarity: self.tone.clarity,
+            ..Tone::default()
+        };
+        self.color.scalars.vibrance = 0.0;
+        self.color.scalars.saturation = 0.0;
+    }
+
     pub fn validate(&self) -> Result<(), ModelError> {
         if self.crop != CropRect::default() {
             return Err(ModelError("v1 supports only the full-image crop".into()));

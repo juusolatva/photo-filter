@@ -125,3 +125,34 @@ fn renderer_rejects_invalid_controls_and_unimplemented_active_effects() {
     edit.curves.master.0[1][1] = 0.9;
     assert!(BasicAdjustments::new(&edit).is_err());
 }
+
+#[test]
+fn resetting_basic_controls_preserves_unexposed_sections() {
+    let mut other = EditState::default();
+    other.tone.clarity = 0.4;
+    other.curves.red.0[1][1] = 0.9;
+    other.color.hsl[0].saturation = 0.7;
+    other.color.scalars.monochrome = true;
+    other.detail.sharpening_amount = 0.5;
+    other.finishing.grain_amount = 0.2;
+    other.custom_stack.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"90bccb08-a7ad-4a2f-a995-89eea097383b", "op":{"type":"FutureV7","payload":[1,2,3]}
+        }))
+        .unwrap(),
+    );
+    let mut edit = other.clone();
+    edit.calibration.exposure = 1.5;
+    edit.calibration.temperature = 0.5;
+    edit.calibration.tint = -0.2;
+    edit.tone.brightness = 0.8;
+    edit.tone.contrast = -0.2;
+    edit.tone.highlights = 0.3;
+    edit.tone.shadows = -0.6;
+    edit.tone.whites = 0.5;
+    edit.tone.blacks = 0.1;
+    edit.color.scalars.vibrance = 0.9;
+    edit.color.scalars.saturation = -0.5;
+    edit.reset_basic();
+    assert_eq!(edit, other);
+}
