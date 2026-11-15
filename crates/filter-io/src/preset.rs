@@ -115,4 +115,19 @@ mod tests {
                 .contains("unsupported preset schema version 2")
         );
     }
+
+    #[test]
+    fn publication_failure_cleans_temporary_and_preserves_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("directory.json");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("keep"), "untouched").unwrap();
+        let preset = Preset::capture("Test", &EditState::default(), &Sections::ALL).unwrap();
+        assert!(write(&destination, &preset).is_err());
+        assert_eq!(
+            std::fs::read_to_string(destination.join("keep")).unwrap(),
+            "untouched"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 }

@@ -3,8 +3,50 @@
 `filter-core` provides the initial Phase 1 model without GUI or GPU dependencies.
 The desktop app stores its adjustments in `EditState`; preview and export render
 calibration, basic tone, vibrance and saturation. Other stored parameters and
-custom nodes await their engine stages. The app has no preset open/save controls
-yet. See [the pointwise renderer](pointwise.md).
+custom nodes await their engine stages. The app supports preset file save/load and
+selective application. See [the pointwise renderer](pointwise.md).
+
+## Desktop workflow
+
+Open an image, then expand **Presets** in the adjustment sidebar. **Load preset…**
+opens a native JSON file dialog; dropping a `.pfpreset.json` (or other `.json`)
+file onto the app loads it too. Loading stages the preset without changing the
+image. Check the sections to apply and select **Apply selected sections**.
+Only sections present in the file are selectable. Unchecked sections retain
+their current values, including explicit nonzero settings.
+
+The current renderer rejects selected active effects it cannot render, leaving
+the edit and preview unchanged. The error names the sections to deselect (for
+example Tone containing clarity, Curves, or Color containing HSL/grading).
+Opaque unknown operations are preserved in the applied custom stack, skipped by
+the renderer, and identified in the loaded-preset panel. Schema/process version
+errors and invalid parameters are rejected at load time, even in sections that
+would not be selected. A successful image replacement clears staged presets;
+results from loads started for an older image are discarded.
+
+Enter a preset name, choose **Sections to save**, and select **Save preset…**.
+The default filename is `edited.pfpreset.json`; the native dialog confirms
+replacement of an existing destination. Saving captures the current edit when
+the button is pressed, so subsequent editing or image replacement does not
+change the saved file. After applying a preset, saving initially selects its
+present sections and retains its ID, author and tags. Saving captures every
+field of each selected section, including neutral values; it does not reproduce
+the original sparse field patch. The custom stack is captured as a replacement
+snapshot, even if the imported preset appended nodes. Node IDs refresh on apply
+under the merge contract below. Unknown operation payloads survive this workflow;
+unselected sections are intentionally omitted.
+
+`filter_io::preset::read` bounds both the file-size check and actual read to
+16 MiB before parsing. `write` validates and checks serialized size before
+writing a sibling temporary file, flushes it, and atomically publishes it.
+Validation or writing failure leaves an existing destination intact. Temporary
+files are removed on failure. File work and native dialogs run on workers; the
+UI admits one dialog/preset file operation at a time. Preset files use private
+temporary-file permissions. The library caller owns overwrite confirmation.
+
+The library continues to support stored effects that the current desktop
+renderer cannot execute. The OS preset library, search/tags editor, thumbnails,
+starter assets, and sidecars remain future work.
 
 ## API
 
@@ -103,9 +145,8 @@ Their stored enabled flag is retained for future applications, but
 `FilterNode::effective_enabled()` returns false so an executor can skip them.
 Node opacity must be finite and within [0, 1].
 
-Pointwise GPU/CPU evaluation, color math expansion, LUT payload/overlay schemas,
-additional node types, warnings in the stack UI, preset file dialogs/browser,
-selective checkboxes, and sidecar file I/O remain subsequent tasks. Newer unknown
+LUT payload/overlay schemas, additional node types, a full stack UI,
+preset browser/thumbnails, and sidecar file I/O remain subsequent tasks. Newer unknown
 operations can already survive a load/save round trip in the current schema.
 
 Fixed v1 JSON fixtures and regression tests live in
