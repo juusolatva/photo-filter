@@ -284,6 +284,23 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
         let result = publish_export(&path, &cancel, |file| {
+            filter_io::write_srgb16_png_with_exif(
+                file,
+                1,
+                1,
+                Some(&[0; 7]),
+                [Ok(vec![[half::f16::ONE; 4]])],
+            )
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid source EXIF metadata")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        let result = publish_export(&path, &cancel, |file| {
             file.write_all(b"finished but cancelled")?;
             cancel.store(true, Ordering::Relaxed);
             Ok(())

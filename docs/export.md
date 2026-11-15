@@ -22,6 +22,11 @@ outside the retained EXIF payload are not copied.
 The `filter-io` API `write_srgb16_png_with_exif` accepts optional raw EXIF from
 `image::ImageDecoder` and pixels that are already oriented. EXIF is limited to 16 MiB,
 matching the import limit; oversized metadata fails before writing the PNG header.
+Empty EXIF is omitted. Nonempty EXIF is checked with the strict `kamadak-exif`
+reader before any PNG bytes are written. Malformed headers, directories or value
+offsets fail export with an `Invalid source EXIF metadata` error, leaving an existing
+destination untouched. Structurally valid metadata with missing or unrecognized
+orientation is retained.
 `write_srgb16_png` remains available for callers that do not need EXIF.
 
 Workspace tests export and reload PNG/JPEG/WebP sources with each of the eight EXIF

@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use filter_core::color::{linear_to_srgb, rec2020_to_linear_srgb};
 use half::f16;
 use moxcms::ColorProfile;
@@ -20,6 +20,7 @@ pub fn write_srgb16_png(
 /// Pixels must already be oriented. Recognized IFD0 orientation is reset to 1 in
 /// an export-owned copy; all other metadata bytes are retained, including unknown
 /// tags. Missing or unrecognized orientation is left unchanged, as on decode.
+/// Empty EXIF is omitted; malformed nonempty EXIF fails before any output is written.
 /// This does not rewrite other source descriptions (dimensions, thumbnails, etc.).
 pub fn write_srgb16_png_with_exif(
     output: impl Write,
@@ -33,6 +34,12 @@ pub fn write_srgb16_png_with_exif(
         exif.is_none_or(|bytes| bytes.len() <= crate::MAX_METADATA_BYTES),
         "EXIF metadata exceeds the 16 MiB limit"
     );
+    let exif = exif.filter(|bytes| !bytes.is_empty());
+    if let Some(bytes) = exif {
+        exif::Reader::new()
+            .read_raw(bytes.to_vec())
+            .context("Invalid source EXIF metadata")?;
+    }
     let mut info = png::Info::with_size(width, height);
     info.color_type = png::ColorType::Rgba;
     info.bit_depth = png::BitDepth::Sixteen;
@@ -206,11 +213,7 @@ mod tests {
 
     #[test]
     fn absent_or_unrecognized_orientation_is_preserved_and_metadata_is_bounded() {
-        for exif in [
-            source_exif(true, None),
-            source_exif(false, Some(9)),
-            vec![0; 7],
-        ] {
+        for exif in [source_exif(true, None), source_exif(false, Some(9))] {
             let mut output = Vec::new();
             write_srgb16_png_with_exif(&mut output, 1, 1, Some(&exif), [Ok(vec![[f16::ONE; 4]])])
                 .unwrap();
@@ -229,6 +232,43 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("EXIF metadata exceeds"));
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn empty_exif_is_omitted_and_malformed_exif_fails_before_writing() {
+        let mut output = Vec::new();
+        write_srgb16_png_with_exif(&mut output, 1, 1, Some(&[]), [Ok(vec![[f16::ONE; 4]])])
+            .unwrap();
+        let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(output)).unwrap();
+        assert!(decoder.exif_metadata().unwrap().is_none());
+        image::DynamicImage::from_decoder(decoder).unwrap();
+
+        let valid = source_exif(true, Some(6));
+        let mut bad_ifd_offset = valid.clone();
+        bad_ifd_offset[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut bad_value_offset = valid.clone();
+        bad_value_offset[18..22].copy_from_slice(&u32::MAX.to_le_bytes());
+        for bytes in [
+            vec![0; 7],
+            valid[..20].to_vec(),
+            bad_ifd_offset,
+            bad_value_offset,
+        ] {
+            let mut output = Vec::new();
+            let error = write_srgb16_png_with_exif(
+                &mut output,
+                1,
+                1,
+                Some(&bytes),
+                [Ok(vec![[f16::ONE; 4]])],
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("Invalid source EXIF metadata"));
+            assert!(
+                output.is_empty(),
+                "invalid EXIF must fail before PNG header writes"
+            );
+        }
     }
 
     #[test]
