@@ -74,7 +74,12 @@ fn convert_to_working(rgba: &[f32], source: &ColorProfile) -> Result<Vec<[f16; 4
     for chunk in rgba.chunks(4096 * 4) {
         let mut output = vec![0.0; chunk.len()];
         transform.transform(chunk, &mut output)?;
-        for (rgb, original) in output.chunks_exact(4).zip(chunk.chunks_exact(4)) {
+        for (rgb, original) in output
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(chunk.as_chunks::<4>().0)
+        {
             pixels.push([
                 f16::from_f32(rgb[0]),
                 f16::from_f32(rgb[1]),
