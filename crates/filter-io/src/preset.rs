@@ -8,7 +8,23 @@ use std::{
 };
 
 pub fn read(path: &Path) -> Result<Preset> {
-    let file = File::open(path).context("Could not open preset")?;
+    ensure!(
+        std::fs::metadata(path)
+            .context("Could not inspect preset")?
+            .is_file(),
+        "Preset must be a regular file"
+    );
+    let mut options = File::options();
+    options.read(true);
+    // Prevent an open from blocking if a regular path becomes a FIFO between
+    // the path check and open. Check the opened descriptor as well.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).context("Could not open preset")?;
+    ensure!(file.metadata()?.is_file(), "Preset must be a regular file");
     ensure!(
         file.metadata()?.len() <= MAX_PRESET_BYTES as u64,
         "Preset exceeds the 16 MiB limit"
@@ -149,6 +165,46 @@ mod tests {
         assert!(
             format!("{:#}", read(&path).unwrap_err())
                 .contains("unsupported preset schema version 2")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn imports_reject_directories_devices_and_named_pipes_without_waiting() {
+        use std::{
+            ffi::CString,
+            os::unix::{ffi::OsStrExt, fs::symlink},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            read(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+        assert!(
+            read(Path::new("/dev/null"))
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+        let fifo = dir.path().join("pipe.json");
+        let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a valid nul-terminated pathname, used only by mkfifo.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(
+            read(&fifo)
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+        let link = dir.path().join("linked-pipe.json");
+        symlink(&fifo, &link).unwrap();
+        assert!(
+            read(&link)
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
         );
     }
 

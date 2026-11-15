@@ -37,13 +37,16 @@ snapshot, even if the imported preset appended nodes. Node IDs refresh on apply
 under the merge contract below. Unknown operation payloads survive this workflow;
 unselected sections are intentionally omitted.
 
-`filter_io::preset::read` bounds both the file-size check and actual read to
+`filter_io::preset::read` accepts regular files (including links to regular
+files), rejects directories/devices/pipes, and bounds both the file-size check and actual read to
 16 MiB before parsing. `write` validates and checks serialized size before
 writing a sibling temporary file, flushes it, and atomically publishes it.
 Validation or writing failure leaves an existing destination intact. Temporary
 files are removed on failure. File work and native dialogs run on workers; the
 UI admits one dialog/preset file operation at a time. New files follow normal
 creation permissions/umask; replacements preserve existing Unix permission bits.
+Atomic replacement does not preserve ownership, filesystem ACLs or extended
+attributes; use a separate destination when those access rules must be retained.
 Saving through an existing symbolic link updates its resolved target and keeps
 the link; a broken link is rejected without replacing it.
 The library caller owns overwrite confirmation.
