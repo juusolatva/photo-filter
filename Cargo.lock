@@ -758,6 +758,7 @@ dependencies = [
  "image",
  "moxcms 0.9.2",
  "png",
+ "tempfile",
 ]
 
 [[package]]

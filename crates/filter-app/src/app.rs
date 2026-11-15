@@ -1,10 +1,12 @@
 use crate::export::{ExportJob, ExportResult};
+use crate::preset_ui::{Action as PresetAction, PresetUi};
 use crate::preview::PreviewCallback;
 use eframe::egui;
 use filter_core::{
     ImageBuffer,
     cpu_eval::BasicAdjustments,
     edit::{EditState, ModelError},
+    preset::Preset,
 };
 use filter_gpu::{ExposureRenderer, SourceTexture};
 use filter_io::DecodedImage;
@@ -22,6 +24,11 @@ type LoadResult = (
 
 enum DialogResult {
     Open(Option<PathBuf>),
+    PresetLoad {
+        generation: u64,
+        result: Option<Result<Box<Preset>, String>>,
+    },
+    PresetSave(Option<Result<PathBuf, String>>),
     Export {
         path: Option<PathBuf>,
         source: Arc<DecodedImage>,
@@ -43,6 +50,7 @@ pub struct PhotoApp {
     status: String,
     edit: EditState,
     adjustments: Result<BasicAdjustments, ModelError>,
+    presets: PresetUi,
     zoom: f32,
     pan: egui::Vec2,
     export: Option<ExportJob>,
@@ -93,6 +101,7 @@ impl PhotoApp {
             status: "Open a JPEG, PNG, WebP or TIFF to begin".into(),
             edit: EditState::default(),
             adjustments: Ok(BasicAdjustments::default()),
+            presets: PresetUi::default(),
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             export: None,
@@ -103,7 +112,7 @@ impl PhotoApp {
         }
         app
     }
-    /// Future preset loading must use this boundary to refresh or reject its snapshot.
+    /// Edit replacement refreshes the immutable renderer snapshot.
     fn replace_edit(&mut self, edit: EditState) {
         self.adjustments = BasicAdjustments::new(&edit);
         self.edit = edit;
@@ -113,6 +122,53 @@ impl PhotoApp {
         self.loading = true;
         self.status = format!("Loading {}…", path.display());
         let _ = self.load_tx.send((self.generation, path));
+    }
+    fn load_preset(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
+        if self.dialog_open || self.loading || self.source.is_none() {
+            self.presets.status = "Open an image before loading a preset.".into();
+            return;
+        }
+        self.dialog_open = true;
+        let generation = self.generation;
+        let tx = self.dialog_tx.clone();
+        let ctx = ctx.clone();
+        self.presets.status = "Loading preset…".into();
+        std::thread::spawn(move || {
+            let path = path.or_else(|| {
+                rfd::FileDialog::new()
+                    .add_filter("Photo Filter preset", &["json"])
+                    .pick_file()
+            });
+            let result = path.map(|path| {
+                filter_io::preset::read(&path)
+                    .map(Box::new)
+                    .map_err(|e| format!("{e:#}"))
+            });
+            let _ = tx.send(DialogResult::PresetLoad { generation, result });
+            ctx.request_repaint();
+        });
+    }
+    fn save_preset(&mut self, ctx: &egui::Context, preset: Preset) {
+        if self.dialog_open {
+            return;
+        }
+        self.dialog_open = true;
+        self.presets.status = "Saving captured preset…".into();
+        let tx = self.dialog_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = rfd::FileDialog::new()
+                .add_filter("Photo Filter preset", &["json"])
+                .set_file_name("edited.pfpreset.json")
+                .save_file()
+                .map(|path| {
+                    filter_io::preset::write(&path, &preset)
+                        .map(|()| path)
+                        .map_err(|e| format!("{e:#}"))
+                });
+            let _ = tx.send(DialogResult::PresetSave(result));
+            ctx.request_repaint();
+        });
     }
     fn dialog(&mut self, ctx: &egui::Context) {
         if self.dialog_open {
@@ -168,6 +224,24 @@ impl eframe::App for PhotoApp {
             self.dialog_open = false;
             match result {
                 DialogResult::Open(Some(path)) => self.open(path),
+                DialogResult::PresetLoad { generation, result } => {
+                    if generation == self.generation {
+                        match result {
+                            Some(Ok(preset)) => self.presets.loaded(*preset),
+                            Some(Err(error)) => {
+                                self.presets.status = format!("Could not load preset: {error}")
+                            }
+                            None => self.presets.status = "Preset loading cancelled".into(),
+                        }
+                    }
+                }
+                DialogResult::PresetSave(result) => {
+                    self.presets.status = match result {
+                        Some(Ok(path)) => format!("Saved preset {}", path.display()),
+                        Some(Err(error)) => format!("Could not save preset: {error}"),
+                        None => "Preset saving cancelled".into(),
+                    };
+                }
                 DialogResult::Export {
                     path: Some(path),
                     source,
@@ -218,6 +292,7 @@ impl eframe::App for PhotoApp {
                         proxy.height()
                     );
                     self.source = Some(source);
+                    self.presets = PresetUi::default();
                     self.replace_edit(EditState::default());
                     self.zoom = 1.0;
                     self.pan = egui::Vec2::ZERO;
@@ -232,7 +307,14 @@ impl eframe::App for PhotoApp {
                 .map(|f| f.path().to_path_buf())
                 .next()
         }) {
-            self.open(path);
+            if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
+                self.load_preset(&ctx, Some(path));
+            } else {
+                self.open(path);
+            }
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.dialog(&ctx);
@@ -294,6 +376,18 @@ impl eframe::App for PhotoApp {
                     });
                     if adjustments_changed {
                         self.adjustments = BasicAdjustments::new(&self.edit);
+                    }
+                    ui.separator();
+                    if let Some(action) = self.presets.show(
+                        ui,
+                        &self.edit,
+                        self.source.is_some() && !self.loading && !self.dialog_open,
+                    ) {
+                        match action {
+                            PresetAction::Load => self.load_preset(&ctx, None),
+                            PresetAction::Save(preset) => self.save_preset(&ctx, *preset),
+                            PresetAction::Apply(edit) => self.replace_edit(*edit),
+                        }
                     }
                     ui.separator();
                     if ui

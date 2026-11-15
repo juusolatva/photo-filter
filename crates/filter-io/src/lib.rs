@@ -1,4 +1,4 @@
-//! Standard-format decoder boundary, independent of GPU and GUI.
+//! Image and preset file I/O, independent of GPU and GUI.
 use anyhow::{Context, Result, ensure};
 use filter_core::ImageBuffer;
 use half::f16;
@@ -7,6 +7,7 @@ use moxcms::{ColorProfile, DataColorSpace, Layout, ToneReprCurve, TransformOptio
 use std::path::Path;
 
 mod export;
+pub mod preset;
 pub use export::write_srgb16_png;
 
 pub struct DecodedImage {
