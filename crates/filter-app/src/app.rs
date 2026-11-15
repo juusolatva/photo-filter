@@ -1,4 +1,4 @@
-use crate::export::{ExportJob, ExportResult};
+use crate::export::{ExportFormat, ExportJob, ExportResult};
 use crate::preset_ui::{Action as PresetAction, PresetUi};
 use crate::preview::PreviewCallback;
 use eframe::egui;
@@ -33,6 +33,7 @@ enum DialogResult {
         path: Option<PathBuf>,
         source: Arc<DecodedImage>,
         adjustments: BasicAdjustments,
+        format: ExportFormat,
     },
 }
 
@@ -55,6 +56,8 @@ pub struct PhotoApp {
     pan: egui::Vec2,
     export: Option<ExportJob>,
     export_status: String,
+    export_jpeg: bool,
+    jpeg_options: filter_io::JpegOptions,
 }
 impl PhotoApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
@@ -106,6 +109,8 @@ impl PhotoApp {
             pan: egui::Vec2::ZERO,
             export: None,
             export_status: String::new(),
+            export_jpeg: false,
+            jpeg_options: filter_io::JpegOptions::default(),
         };
         if let Some(path) = path {
             app.open(path);
@@ -208,18 +213,28 @@ impl PhotoApp {
                 return;
             }
         };
+        let format = if self.export_jpeg {
+            ExportFormat::Jpeg(self.jpeg_options)
+        } else {
+            ExportFormat::Png
+        };
         self.dialog_open = true;
         let tx = self.dialog_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
+            let extensions: &[&str] = match format {
+                ExportFormat::Png => &["png"],
+                ExportFormat::Jpeg(_) => &["jpg", "jpeg"],
+            };
             let path = rfd::FileDialog::new()
-                .add_filter("16-bit PNG", &["png"])
-                .set_file_name("edited.png")
+                .add_filter(format.label(), extensions)
+                .set_file_name(format!("edited.{}", format.extension()))
                 .save_file();
             let _ = tx.send(DialogResult::Export {
                 path,
                 source,
                 adjustments,
+                format,
             });
             ctx.request_repaint();
         });
@@ -248,6 +263,7 @@ impl eframe::App for PhotoApp {
                     path: Some(path),
                     source,
                     adjustments,
+                    format,
                 } => {
                     match ExportJob::start(
                         rs.device.clone(),
@@ -255,6 +271,7 @@ impl eframe::App for PhotoApp {
                         source,
                         adjustments,
                         path,
+                        format,
                         ctx.clone(),
                     ) {
                         Ok(job) => {
@@ -392,22 +409,43 @@ impl eframe::App for PhotoApp {
                         }
                     }
                     ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Format");
+                        ui.selectable_value(&mut self.export_jpeg, false, "PNG");
+                        ui.selectable_value(&mut self.export_jpeg, true, "JPEG");
+                    });
+                    if self.export_jpeg {
+                        ui.add(
+                            egui::Slider::new(&mut self.jpeg_options.quality, 1..=100)
+                                .text("Quality"),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Background");
+                            ui.color_edit_button_srgb(&mut self.jpeg_options.background);
+                        });
+                        let mut dither = self.jpeg_options.dither_seed.is_some();
+                        if ui.checkbox(&mut dither, "Dither 8-bit output").changed() {
+                            self.jpeg_options.dither_seed = dither.then_some(0);
+                        }
+                        ui.label("Full resolution · 8-bit sRGB · flattened alpha");
+                    } else {
+                        ui.label("Full resolution · 16-bit sRGB · preserves alpha");
+                    }
                     if ui
                         .add_enabled(
                             self.source.is_some()
                                 && self.adjustments.is_ok()
                                 && !self.dialog_open
                                 && self.export.is_none(),
-                            egui::Button::new("Export PNG…"),
+                            egui::Button::new("Export…"),
                         )
                         .clicked()
                     {
                         self.export_dialog(&ctx);
                     }
-                    ui.label("Full resolution · 16-bit sRGB · preserves alpha");
                     if let Some(export) = &self.export {
                         ui.add(egui::ProgressBar::new(export.progress()).show_percentage());
-                        ui.label("Exporting captured adjustments");
+                        ui.label("Rendering and encoding captured adjustments");
                         if ui
                             .add_enabled(
                                 !export.is_cancelling(),

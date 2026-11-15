@@ -718,6 +718,7 @@ dependencies = [
  "filter-gpu",
  "filter-io",
  "half",
+ "image",
  "png",
  "pollster",
  "rfd",

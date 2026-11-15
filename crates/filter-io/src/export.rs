@@ -1,8 +1,146 @@
 use anyhow::{Context, Result, ensure};
-use filter_core::color::{linear_to_srgb, rec2020_to_linear_srgb};
+use filter_core::color::{linear_to_srgb, rec2020_to_linear_srgb, srgb_to_linear};
 use half::f16;
+use image::ImageEncoder;
 use moxcms::ColorProfile;
 use std::{borrow::Cow, io::Write};
+
+/// JPEG options. Background channels are encoded sRGB; compositing uses linear light.
+#[derive(Clone, Copy, Debug)]
+pub struct JpegOptions {
+    pub quality: u8,
+    pub background: [u8; 3],
+    /// Seeded triangular noise, in units of one 8-bit step. None disables dithering.
+    pub dither_seed: Option<u64>,
+}
+
+impl Default for JpegOptions {
+    fn default() -> Self {
+        Self {
+            quality: 90,
+            background: [255; 3],
+            dither_seed: Some(0),
+        }
+    }
+}
+
+fn normalized_exif(exif: Option<&[u8]>, limit: usize) -> Result<Option<Vec<u8>>> {
+    ensure!(
+        exif.is_none_or(|bytes| bytes.len() <= limit),
+        "EXIF metadata exceeds the export limit ({limit} bytes)"
+    );
+    exif.filter(|bytes| !bytes.is_empty())
+        .map(|bytes| {
+            exif::Reader::new()
+                .read_raw(bytes.to_vec())
+                .context("Invalid source EXIF metadata")?;
+            let mut bytes = bytes.to_vec();
+            let _ = image::metadata::Orientation::remove_from_exif_chunk(&mut bytes);
+            Ok(bytes)
+        })
+        .transpose()
+}
+
+/// Encode oriented straight linear Rec.2020 bands as an 8-bit sRGB JPEG.
+/// Retains validated EXIF, normalizes orientation and embeds an output sRGB ICC.
+/// Uses an RGB8 CPU buffer (3 bytes/pixel, capped at 512 MiB), plus the current band.
+/// JPEG's APP1 segment permits at most 65527 raw EXIF bytes; larger EXIF fails.
+/// Caller owns cancellation of encoding writes and atomic file publication.
+pub fn write_srgb8_jpeg(
+    mut output: impl Write,
+    width: u32,
+    height: u32,
+    exif: Option<&[u8]>,
+    options: JpegOptions,
+    bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
+) -> Result<()> {
+    ensure!(
+        width > 0 && height > 0 && width <= 65535 && height <= 65535,
+        "JPEG dimensions must be between 1 and 65535"
+    );
+    ensure!(
+        (1..=100).contains(&options.quality),
+        "JPEG quality must be between 1 and 100"
+    );
+    let exif = normalized_exif(exif, 65527)?;
+    let count = u64::from(width) * u64::from(height);
+    ensure!(
+        count * 3 <= 512 * 1024 * 1024,
+        "JPEG RGB buffer exceeds the 512 MiB limit"
+    );
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(count as usize * 3)
+        .context("Could not allocate JPEG RGB buffer")?;
+    let background = options
+        .background
+        .map(|c| srgb_to_linear(f32::from(c) / 255.0));
+    let mut remaining = count;
+    for band in bands {
+        let band = band?;
+        ensure!(
+            band.len() as u64 <= remaining,
+            "Too many pixels for JPEG dimensions"
+        );
+        remaining -= band.len() as u64;
+        for pixel in band {
+            let index = rgb.len() as u64 / 3;
+            rgb.extend_from_slice(&jpeg_pixel(pixel, background, options.dither_seed, index));
+        }
+    }
+    ensure!(remaining == 0, "Not enough pixels for JPEG dimensions");
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, options.quality);
+    encoder.set_icc_profile(ColorProfile::new_srgb().encode()?)?;
+    if let Some(exif) = exif {
+        encoder.set_exif_metadata(exif)?;
+    }
+    encoder.write_image(&rgb, width, height, image::ExtendedColorType::Rgb8)?;
+    output.flush()?;
+    Ok(())
+}
+
+fn jpeg_pixel(
+    pixel: [f16; 4],
+    background: [f32; 3],
+    dither_seed: Option<u64>,
+    index: u64,
+) -> [u8; 3] {
+    let [r, g, b, a] = pixel.map(f16::to_f32);
+    let alpha = if a.is_finite() {
+        a.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let rgb = rec2020_to_linear_srgb([r, g, b]);
+    std::array::from_fn(|c| {
+        let background = background[c];
+        // Ignore hidden color entirely at zero alpha, including non-finite RGB.
+        let linear = if alpha == 0.0 {
+            background
+        } else {
+            rgb[c] * alpha + background * (1.0 - alpha)
+        };
+        let value = linear_to_srgb(linear).clamp(0.0, 1.0) * 255.0;
+        let noise = dither_seed.map_or(0.0, |seed| triangular_noise(seed, index * 3 + c as u64));
+        (value + noise).round().clamp(0.0, 255.0) as u8
+    })
+}
+
+fn triangular_noise(seed: u64, sample: u64) -> f32 {
+    // SplitMix64 finalizer: two independent uniforms yield triangular [-1, 1] noise.
+    let uniform = |offset| {
+        let mut v = seed.wrapping_add(
+            sample
+                .wrapping_mul(2)
+                .wrapping_add(offset)
+                .wrapping_mul(0x9e3779b97f4a7c15),
+        );
+        v = (v ^ (v >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        v = (v ^ (v >> 27)).wrapping_mul(0x94d049bb133111eb);
+        ((v ^ (v >> 31)) >> 40) as f32 / 16777216.0
+    };
+    uniform(0) - uniform(1)
+}
 
 /// Stream row-major straight linear Rec.2020 pixels to a 16-bit RGBA sRGB PNG.
 /// Quantization clips to the initial sRGB output gamut, matching the viewport.
@@ -30,25 +168,12 @@ pub fn write_srgb16_png_with_exif(
     bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
 ) -> Result<()> {
     ensure!(width > 0 && height > 0, "Invalid PNG dimensions");
-    ensure!(
-        exif.is_none_or(|bytes| bytes.len() <= crate::MAX_METADATA_BYTES),
-        "EXIF metadata exceeds the 16 MiB limit"
-    );
-    let exif = exif.filter(|bytes| !bytes.is_empty());
-    if let Some(bytes) = exif {
-        exif::Reader::new()
-            .read_raw(bytes.to_vec())
-            .context("Invalid source EXIF metadata")?;
-    }
+    let exif = normalized_exif(exif, crate::MAX_METADATA_BYTES)?;
     let mut info = png::Info::with_size(width, height);
     info.color_type = png::ColorType::Rgba;
     info.bit_depth = png::BitDepth::Sixteen;
     info.icc_profile = Some(Cow::Owned(ColorProfile::new_srgb().encode()?));
-    info.exif_metadata = exif.map(|bytes| {
-        let mut bytes = bytes.to_vec();
-        let _ = image::metadata::Orientation::remove_from_exif_chunk(&mut bytes);
-        Cow::Owned(bytes)
-    });
+    info.exif_metadata = exif.map(Cow::Owned);
     let mut writer = png::Encoder::with_info(output, info)?.write_header()?;
     let mut remaining = u64::from(width) * u64::from(height);
     {
@@ -128,6 +253,190 @@ mod tests {
         bytes.extend_from_slice(&long(0));
         bytes.extend_from_slice(b"Canon\0");
         bytes
+    }
+
+    #[test]
+    fn jpeg_composites_linear_light_and_preserves_profile_and_normalized_exif() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("export.jpg");
+        let options = JpegOptions {
+            quality: 100,
+            background: [128, 64, 192],
+            dither_seed: None,
+        };
+        for little_endian in [true, false] {
+            for orientation in 1..=8 {
+                let exif = source_exif(little_endian, Some(orientation));
+                // Uniform patches avoid JPEG ringing; transparency must ignore hidden RGB.
+                for (pixel, expected) in [
+                    ([0.0, 0.0, 0.0, 0.5], [92, 44, 140]),
+                    ([8.0, -2.0, 4.0, 0.0], options.background),
+                    ([0.25, 0.25, 0.25, 1.0], [137; 3]),
+                ] {
+                    write_srgb8_jpeg(
+                        std::fs::File::create(&path).unwrap(),
+                        17,
+                        9,
+                        Some(&exif),
+                        options,
+                        [Ok(vec![pixel.map(f16::from_f32); 17 * 9])],
+                    )
+                    .unwrap();
+                    let mut decoder = image::codecs::jpeg::JpegDecoder::new(Cursor::new(
+                        std::fs::read(&path).unwrap(),
+                    ))
+                    .unwrap();
+                    assert_eq!(decoder.dimensions(), (17, 9));
+                    assert_eq!(decoder.color_type(), image::ColorType::Rgb8);
+                    let profile =
+                        ColorProfile::new_from_slice(&decoder.icc_profile().unwrap().unwrap())
+                            .unwrap();
+                    let mut expected_profile = ColorProfile::new_srgb();
+                    expected_profile.creation_date_time = profile.creation_date_time;
+                    assert_eq!(
+                        profile.encode().unwrap(),
+                        expected_profile.encode().unwrap()
+                    );
+                    let mut normalized = exif.clone();
+                    let _ = image::metadata::Orientation::remove_from_exif_chunk(&mut normalized);
+                    assert_eq!(decoder.exif_metadata().unwrap().unwrap(), normalized);
+                    let rgb = image::DynamicImage::from_decoder(decoder)
+                        .unwrap()
+                        .into_rgb8();
+                    for actual in rgb.pixels() {
+                        for c in 0..3 {
+                            assert!(
+                                (i16::from(actual[c]) - i16::from(expected[c])).abs() <= 2,
+                                "{actual:?} vs {expected:?}"
+                            );
+                        }
+                    }
+                    let reloaded = crate::decode(&path).unwrap();
+                    assert_eq!(
+                        reloaded.source_orientation,
+                        image::metadata::Orientation::NoTransforms
+                    );
+                    assert_eq!((reloaded.buffer.width(), reloaded.buffer.height()), (17, 9));
+                    assert!(reloaded.buffer.pixels().iter().all(|p| p[3] == f16::ONE));
+                    assert_eq!(exif, source_exif(little_endian, Some(orientation)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jpeg_quality_changes_compression_and_dither_is_seeded_and_band_independent() {
+        let pixels: Vec<_> = (0..64 * 33)
+            .map(|i| {
+                let value = ((i * 37 % 256) as f32 / 255.0) * 0.5;
+                [value, value, value, 1.0].map(f16::from_f32)
+            })
+            .collect();
+        let encode = |quality, bands| {
+            let mut output = Vec::new();
+            write_srgb8_jpeg(
+                &mut output,
+                64,
+                33,
+                None,
+                JpegOptions {
+                    quality,
+                    ..Default::default()
+                },
+                bands,
+            )
+            .unwrap();
+            output
+        };
+        let high = encode(100, vec![Ok(pixels.clone())]);
+        let low = encode(10, vec![Ok(pixels.clone())]);
+        assert!(high.len() > low.len() * 2);
+        let split = encode(100, pixels.chunks(71).map(|p| Ok(p.to_vec())).collect());
+        let decode = |bytes: Vec<u8>| image::load_from_memory(&bytes).unwrap().into_rgb8();
+        assert_eq!(decode(high), decode(split));
+        let noise: Vec<_> = (0..10000).map(|i| triangular_noise(42, i)).collect();
+        assert!(noise.iter().all(|v| (-1.0..=1.0).contains(v)));
+        assert!(noise.iter().sum::<f32>().abs() / 10000.0 < 0.02);
+        let pixel = [0.18, 0.18, 0.18, 1.0].map(f16::from_f32);
+        let first: Vec<_> = (0..100)
+            .map(|i| jpeg_pixel(pixel, [1.0; 3], Some(42), i))
+            .collect();
+        let second: Vec<_> = (0..100)
+            .map(|i| jpeg_pixel(pixel, [1.0; 3], Some(43), i))
+            .collect();
+        assert_ne!(first, second);
+        assert!(first.windows(2).any(|p| p[0] != p[1]));
+        assert_eq!(jpeg_pixel([f16::NAN; 4], [1.0; 3], None, 0), [255; 3]);
+    }
+
+    #[test]
+    fn jpeg_rejects_invalid_options_metadata_and_bands_before_output() {
+        let valid = source_exif(true, Some(6));
+        let mut at_limit = valid.clone();
+        at_limit.resize(65527, 0);
+        let mut output = Vec::new();
+        write_srgb8_jpeg(
+            &mut output,
+            1,
+            1,
+            Some(&at_limit),
+            JpegOptions::default(),
+            [Ok(vec![[f16::ONE; 4]])],
+        )
+        .unwrap();
+        let mut decoder = image::codecs::jpeg::JpegDecoder::new(Cursor::new(output)).unwrap();
+        assert_eq!(decoder.exif_metadata().unwrap().unwrap().len(), 65527);
+        let mut oversized = at_limit;
+        oversized.push(0);
+        for (width, height, exif, quality) in [
+            (0, 1, None, 90),
+            (65536, 1, None, 90),
+            (65535, 65535, None, 90),
+            (1, 1, None, 0),
+            (1, 1, None, 101),
+            (1, 1, Some(&[0; 7][..]), 90),
+            (1, 1, Some(oversized.as_slice()), 90),
+        ] {
+            let mut output = Vec::new();
+            assert!(
+                write_srgb8_jpeg(
+                    &mut output,
+                    width,
+                    height,
+                    exif,
+                    JpegOptions {
+                        quality,
+                        ..Default::default()
+                    },
+                    [Ok(vec![[f16::ONE; 4]])]
+                )
+                .is_err()
+            );
+            assert!(output.is_empty());
+        }
+        for bands in [
+            vec![Ok(vec![])],
+            vec![Ok(vec![[f16::ONE; 4]; 2])],
+            vec![Err(anyhow::anyhow!("producer failed"))],
+        ] {
+            let mut output = Vec::new();
+            assert!(
+                write_srgb8_jpeg(&mut output, 1, 1, None, JpegOptions::default(), bands).is_err()
+            );
+            assert!(output.is_empty());
+        }
+        let mut output = Vec::new();
+        write_srgb8_jpeg(
+            &mut output,
+            1,
+            1,
+            Some(&[]),
+            JpegOptions::default(),
+            [Ok(vec![[f16::ONE; 4]])],
+        )
+        .unwrap();
+        let mut decoder = image::codecs::jpeg::JpegDecoder::new(Cursor::new(output)).unwrap();
+        assert!(decoder.exif_metadata().unwrap().is_none());
     }
 
     #[test]
