@@ -57,6 +57,7 @@ impl ExportJob {
                     &device,
                     &queue,
                     &source.buffer,
+                    source.exif_bytes.as_deref(),
                     &adjustments,
                     &path,
                     plan,
@@ -104,6 +105,7 @@ fn export_png(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     source: &filter_core::ImageBuffer,
+    exif: Option<&[u8]>,
     adjustments: &BasicAdjustments,
     path: &std::path::Path,
     plan: TilePlan,
@@ -156,7 +158,7 @@ fn export_png(
         })())
     });
     publish_export(path, cancel, |file| {
-        filter_io::write_srgb16_png(file, source.width(), source.height(), bands)
+        filter_io::write_srgb16_png_with_exif(file, source.width(), source.height(), exif, bands)
     })
 }
 
@@ -282,6 +284,23 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
         let result = publish_export(&path, &cancel, |file| {
+            filter_io::write_srgb16_png_with_exif(
+                file,
+                1,
+                1,
+                Some(&[0; 7]),
+                [Ok(vec![[half::f16::ONE; 4]])],
+            )
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid source EXIF metadata")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        let result = publish_export(&path, &cancel, |file| {
             file.write_all(b"finished but cancelled")?;
             cancel.store(true, Ordering::Relaxed);
             Ok(())
@@ -355,10 +374,15 @@ mod tests {
             let plan = TilePlan::new(w, h, &device.limits(), 17).unwrap();
             let count = plan.tile_count();
             let completed = AtomicU64::new(0);
+            // The captured source metadata must travel through the tiled export too.
+            let exif = [
+                73, 73, 42, 0, 8, 0, 0, 0, 1, 0, 18, 1, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
+            ];
             export_png(
                 &device,
                 &queue,
                 &image,
+                Some(&exif),
                 &snapshot,
                 &path,
                 plan,
@@ -372,6 +396,13 @@ mod tests {
                     .read_info()
                     .unwrap();
             assert!(reader.info().icc_profile.is_some());
+            let mut expected_exif = exif;
+            expected_exif[18] = 1;
+            assert_eq!(
+                reader.info().exif_metadata.as_deref(),
+                Some(expected_exif.as_slice())
+            );
+            assert_eq!(exif[18], 6, "export must not mutate the source metadata");
             assert_eq!(
                 reader.output_color_type(),
                 (png::ColorType::Rgba, png::BitDepth::Sixteen)
@@ -468,6 +499,7 @@ mod tests {
                 &device,
                 &queue,
                 &source,
+                None,
                 &BasicAdjustments::exposure(1.0).unwrap(),
                 &path,
                 plan,
