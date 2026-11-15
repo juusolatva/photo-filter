@@ -54,7 +54,14 @@ impl ExportJob {
             .name("png-export".into())
             .spawn(move || {
                 let result = export_png(
-                    &device, &queue, &source, ev, &path, plan, &cancel, &completed,
+                    &device,
+                    &queue,
+                    &source.buffer,
+                    ev,
+                    &path,
+                    plan,
+                    &cancel,
+                    &completed,
                 );
                 let message = match result {
                     Ok(()) => ExportResult::Saved(path),
@@ -96,7 +103,7 @@ impl Drop for ExportJob {
 fn export_png(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    source: &DecodedImage,
+    source: &filter_core::ImageBuffer,
     ev: f32,
     path: &std::path::Path,
     plan: TilePlan,
@@ -109,7 +116,7 @@ fn export_png(
         let first = *tiles.peek()?;
         Some((|| -> Result<_> {
             ensure!(!cancel.load(Ordering::Relaxed), "Export cancelled");
-            let width = source.buffer.width() as usize;
+            let width = source.width() as usize;
             let count = width
                 .checked_mul(first.height as usize)
                 .context("Export band dimensions overflow")?;
@@ -120,7 +127,7 @@ fn export_png(
             while tiles.peek().is_some_and(|tile| tile.y == first.y) {
                 ensure!(!cancel.load(Ordering::Relaxed), "Export cancelled");
                 let tile = tiles.next().expect("peeked tile");
-                let mut pending = renderer.submit(device, queue, &source.buffer, tile, ev)?;
+                let mut pending = renderer.submit(device, queue, source, tile, ev)?;
                 let started = Instant::now();
                 let pixels = loop {
                     ensure!(!cancel.load(Ordering::Relaxed), "Export cancelled");
@@ -148,7 +155,7 @@ fn export_png(
         })())
     });
     publish_export(path, cancel, |file| {
-        filter_io::write_srgb16_png(file, source.buffer.width(), source.buffer.height(), bands)
+        filter_io::write_srgb16_png(file, source.width(), source.height(), bands)
     })
 }
 
@@ -210,5 +217,107 @@ mod tests {
         })
         .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"complete");
+    }
+
+    #[test]
+    #[ignore = "requires a software GPU and about 400 MiB RAM; exercises >36MP PNG export"]
+    fn large_png_export_exceeds_texture_and_full_readback_limits() {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::PRIMARY,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: true,
+                    ..Default::default()
+                })
+                .await
+                .expect("software adapter required");
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_limits: wgpu::Limits {
+                        max_texture_dimension_2d: 2048,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let (w, h) = (6101_u32, 6001_u32);
+            assert!(w > device.limits().max_texture_dimension_2d);
+            assert!(u64::from(w) * u64::from(h) * 8 > device.limits().max_buffer_size);
+            let levels = [0.0625_f32, 0.125, 0.25, 0.5];
+            let alphas = [0.0_f32, 0.25, 0.5, 1.0];
+            let source = filter_core::ImageBuffer::new(
+                w,
+                h,
+                (0..w * h)
+                    .map(|i| {
+                        let x = i % w;
+                        let y = i / w;
+                        let level = levels[((x / 73 + y / 71) % 4) as usize];
+                        [level, level, level, alphas[((x + y) % 4) as usize]]
+                            .map(half::f16::from_f32)
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("large.png");
+            std::fs::write(&path, b"old destination").unwrap();
+            let cancel = AtomicBool::new(false);
+            let completed = AtomicU64::new(0);
+            let plan = TilePlan::new(w, h, &device.limits(), 1024).unwrap();
+            let total = plan.tile_count();
+            let started = Instant::now();
+            export_png(
+                &device, &queue, &source, 1.0, &path, plan, &cancel, &completed,
+            )
+            .unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), total);
+            // Verify every decoded output pixel without allocating another full image.
+            let mut reader =
+                png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()))
+                    .read_info()
+                    .unwrap();
+            assert_eq!((reader.info().width, reader.info().height), (w, h));
+            assert_eq!(
+                reader.output_color_type(),
+                (png::ColorType::Rgba, png::BitDepth::Sixteen)
+            );
+            assert!(reader.info().icc_profile.is_some());
+            assert!(reader.info().exif_metadata.is_none());
+            let expected_rgb = levels.map(|v| {
+                filter_core::color::rec2020_to_linear_srgb([v * 2.0; 3]).map(|c| {
+                    (filter_core::color::linear_to_srgb(c).clamp(0.0, 1.0) * 65535.0).round() as i32
+                })
+            });
+            let expected_alpha = alphas.map(|v| (v * 65535.0).round() as u16);
+            for y in 0..h {
+                let row = reader.next_row().unwrap().expect("missing output row");
+                assert_eq!(row.data().len(), w as usize * 8);
+                for (x, pixel) in row.data().as_chunks::<8>().0.iter().enumerate() {
+                    let actual: [u16; 4] = std::array::from_fn(|c| {
+                        u16::from_be_bytes([pixel[c * 2], pixel[c * 2 + 1]])
+                    });
+                    let expected = expected_rgb[((x as u32 / 73 + y / 71) % 4) as usize];
+                    for c in 0..3 {
+                        assert!(
+                            (i32::from(actual[c]) - expected[c]).abs() <= 1,
+                            "pixel {x},{y}: {actual:?}"
+                        );
+                    }
+                    assert_eq!(actual[3], expected_alpha[((x as u32 + y) % 4) as usize]);
+                }
+            }
+            assert!(reader.next_row().unwrap().is_none());
+            reader.finish().unwrap();
+            eprintln!(
+                "Validated {} pixels across {total} tiles in {:.2?}",
+                u64::from(w) * u64::from(h),
+                started.elapsed()
+            );
+        });
     }
 }
