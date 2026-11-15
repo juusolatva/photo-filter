@@ -1,0 +1,12 @@
+[package]
+name = "filter-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+filter-core.workspace = true
+anyhow.workspace = true
+image.workspace = true
+moxcms.workspace = true
+half.workspace = true

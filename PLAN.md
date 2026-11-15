@@ -318,6 +318,9 @@ For users who want to go beyond standard sliders and craft complex/artistic look
 ## 9. Phased Implementation Roadmap
 
 ### Phase 0: Workspace Bootstrap, Minimal Viewer & GPU Integration Spike
+
+Implementation status (2026-11-15): initial workspace/viewer slice implemented. The four crates, aligned GPU dependencies, custom device configuration, asynchronous oriented/ICC decoding, half-float source storage, alpha-aware proxy, and callback exposure viewport are in place. Tests cover color/proxy math, wide-gamut conversion, orientation/metadata, and an explicit software-GPU exposure/readback check. Tiled >36MP readback and cross-platform performance/desktop validation remain open; Phase 0 is not yet complete.
+
 * **Deliverables:**
   * Initialize Cargo workspace (`Cargo.toml` with `resolver = "3"` + `filter-core`, `filter-gpu`, `filter-io`, `filter-app`) with aligned `wgpu` version.
   * `eframe` desktop window launching cleanly on Linux and Windows, with a custom `device_descriptor` requesting adapter limits/features and `Backends::PRIMARY`.
