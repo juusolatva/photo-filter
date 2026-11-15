@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use filter_core::cpu_eval::BasicAdjustments;
 use filter_gpu::{TilePlan, TiledExposure};
-use filter_io::{DecodedImage, JpegOptions};
+use filter_io::{DecodedImage, JpegOptions, PngBitDepth, PngOptions};
 use std::io::Write;
 use std::{
     path::PathBuf,
@@ -15,19 +15,22 @@ use std::{
 
 #[derive(Clone, Copy, Debug)]
 pub enum ExportFormat {
-    Png,
+    Png(PngOptions),
     Jpeg(JpegOptions),
 }
 impl ExportFormat {
     pub fn extension(self) -> &'static str {
         match self {
-            Self::Png => "png",
+            Self::Png(_) => "png",
             Self::Jpeg(_) => "jpg",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Png => "16-bit PNG",
+            Self::Png(options) => match options.bit_depth {
+                PngBitDepth::Eight => "8-bit PNG",
+                PngBitDepth::Sixteen => "16-bit PNG",
+            },
             Self::Jpeg(_) => "JPEG",
         }
     }
@@ -37,7 +40,7 @@ impl ExportFormat {
             .and_then(|ext| ext.to_str())
             .unwrap_or_default();
         let valid = match self {
-            Self::Png => extension.eq_ignore_ascii_case("png"),
+            Self::Png(_) => extension.eq_ignore_ascii_case("png"),
             Self::Jpeg(_) => {
                 extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
             }
@@ -47,7 +50,7 @@ impl ExportFormat {
             "{} export requires a filename ending in {}",
             self.label(),
             match self {
-                Self::Png => ".png",
+                Self::Png(_) => ".png",
                 Self::Jpeg(_) => ".jpg or .jpeg",
             }
         );
@@ -217,12 +220,14 @@ fn export_image(
             },
         );
         match format {
-            ExportFormat::Png => filter_io::write_srgb16_png_with_exif(
+            ExportFormat::Png(options) => filter_io::write_srgb_png_cancellable(
                 &mut output,
                 source.width(),
                 source.height(),
                 exif,
+                options,
                 bands,
+                || cancel.load(Ordering::Relaxed),
             )?,
             ExportFormat::Jpeg(options) => filter_io::write_srgb8_jpeg_cancellable(
                 &mut output,
@@ -322,22 +327,22 @@ mod tests {
     #[test]
     fn export_requires_an_extension_matching_the_selected_format() {
         assert!(
-            ExportFormat::Png
+            ExportFormat::Png(PngOptions::default())
                 .validate_path(std::path::Path::new("photo.png"))
                 .is_ok()
         );
         assert!(
-            ExportFormat::Png
+            ExportFormat::Png(PngOptions::default())
                 .validate_path(std::path::Path::new("photo.PNG"))
                 .is_ok()
         );
         assert!(
-            ExportFormat::Png
+            ExportFormat::Png(PngOptions::default())
                 .validate_path(std::path::Path::new("photo.jpg"))
                 .is_err()
         );
         assert!(
-            ExportFormat::Png
+            ExportFormat::Png(PngOptions::default())
                 .validate_path(std::path::Path::new("photo"))
                 .is_err()
         );
@@ -355,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn jpeg_cancellation_during_encoding_preserves_destination() {
+    fn cancellation_during_encoding_preserves_destination() {
         struct CancelAfterWrite<'a> {
             file: &'a mut std::fs::File,
             cancel: &'a AtomicBool,
@@ -371,29 +376,42 @@ mod tests {
             }
         }
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("edited.jpg");
-        std::fs::write(&path, b"original").unwrap();
-        let cancel = AtomicBool::new(false);
-        let result = publish_export(&path, &cancel, |file| {
-            filter_io::write_srgb8_jpeg(
-                CancelWriter {
+        for format in [
+            ExportFormat::Png(PngOptions {
+                bit_depth: PngBitDepth::Eight,
+                ..Default::default()
+            }),
+            ExportFormat::Png(PngOptions::default()),
+            ExportFormat::Jpeg(JpegOptions::default()),
+        ] {
+            let path = directory
+                .path()
+                .join(format!("edited.{}", format.extension()));
+            std::fs::write(&path, b"original").unwrap();
+            let cancel = AtomicBool::new(false);
+            let result = publish_export(&path, &cancel, |file| {
+                let output = CancelWriter {
                     output: CancelAfterWrite {
                         file,
                         cancel: &cancel,
                     },
                     cancel: &cancel,
-                },
-                17,
-                9,
-                None,
-                JpegOptions::default(),
-                [Ok(vec![[half::f16::ONE; 4]; 17 * 9])],
-            )
-        });
-        assert!(result.is_err());
-        assert!(cancel.load(Ordering::Relaxed));
-        assert_eq!(std::fs::read(&path).unwrap(), b"original");
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+                };
+                let bands = [Ok(vec![[half::f16::ONE; 4]; 17 * 9])];
+                match format {
+                    ExportFormat::Png(options) => {
+                        filter_io::write_srgb_png(output, 17, 9, None, options, bands)
+                    }
+                    ExportFormat::Jpeg(options) => {
+                        filter_io::write_srgb8_jpeg(output, 17, 9, None, options, bands)
+                    }
+                }
+            });
+            assert!(result.is_err());
+            assert!(cancel.load(Ordering::Relaxed));
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     #[test]
@@ -540,7 +558,7 @@ mod tests {
                 Some(&exif),
                 &snapshot,
                 &path,
-                ExportFormat::Png,
+                ExportFormat::Png(PngOptions::default()),
                 plan,
                 &AtomicBool::new(false),
                 &completed,
@@ -596,6 +614,67 @@ mod tests {
             }
             assert!(reader.next_row().unwrap().is_none());
             reader.finish().unwrap();
+            for seed in [None, Some(0)] {
+                let options = PngOptions {
+                    bit_depth: PngBitDepth::Eight,
+                    dither_seed: seed,
+                };
+                let mut previous = None;
+                for tile_edge in [17, 31] {
+                    let path = directory.path().join("adjusted8.png");
+                    completed.store(0, Ordering::Relaxed);
+                    let plan = TilePlan::new(w, h, &device.limits(), tile_edge).unwrap();
+                    let count = plan.tile_count();
+                    export_image(
+                        &device,
+                        &queue,
+                        &image,
+                        Some(&exif),
+                        &snapshot,
+                        &path,
+                        ExportFormat::Png(options),
+                        plan,
+                        &AtomicBool::new(false),
+                        &completed,
+                    )
+                    .unwrap();
+                    assert_eq!(completed.load(Ordering::Relaxed), count);
+                    let reloaded = filter_io::decode(&path).unwrap();
+                    assert_eq!(
+                        reloaded.exif_bytes.as_deref(),
+                        Some(expected_exif.as_slice())
+                    );
+                    assert_eq!(
+                        reloaded.source_orientation,
+                        image::metadata::Orientation::NoTransforms
+                    );
+                    let actual = image::open(&path).unwrap();
+                    assert_eq!(actual.color(), image::ColorType::Rgba8);
+                    let actual = actual.into_rgba8();
+                    for (original, actual) in image.pixels().iter().zip(actual.pixels()) {
+                        let working = snapshot
+                            .pixel(original.map(half::f16::to_f32))
+                            .map(|v| half::f16::from_f32(v).to_f32());
+                        let rgb = filter_core::color::rec2020_to_linear_srgb(
+                            working[..3].try_into().unwrap(),
+                        );
+                        for c in 0..3 {
+                            let expected =
+                                filter_core::color::linear_to_srgb(rgb[c]).clamp(0.0, 1.0) * 255.0;
+                            // Up to 1.5 steps of dither/rounding plus CPU/GPU half-float error.
+                            assert!((f32::from(actual[c]) - expected).abs() <= 2.0);
+                        }
+                        assert_eq!(actual[3], (working[3] * 255.0).round() as u8);
+                    }
+                    if let Some(previous) = previous {
+                        assert_eq!(
+                            actual, previous,
+                            "tile boundaries must not affect dithering"
+                        );
+                    }
+                    previous = Some(actual);
+                }
+            }
             let jpeg_path = directory.path().join("adjusted.jpg");
             let options = JpegOptions {
                 quality: 100,
@@ -721,7 +800,7 @@ mod tests {
                 None,
                 &BasicAdjustments::exposure(1.0).unwrap(),
                 &path,
-                ExportFormat::Png,
+                ExportFormat::Png(PngOptions::default()),
                 plan,
                 &cancel,
                 &completed,
@@ -765,6 +844,63 @@ mod tests {
             }
             assert!(reader.next_row().unwrap().is_none());
             reader.finish().unwrap();
+            let png8_started = Instant::now();
+            let png8_path = directory.path().join("large8.png");
+            completed.store(0, Ordering::Relaxed);
+            export_image(
+                &device,
+                &queue,
+                &source,
+                None,
+                &BasicAdjustments::exposure(1.0).unwrap(),
+                &png8_path,
+                ExportFormat::Png(PngOptions {
+                    bit_depth: PngBitDepth::Eight,
+                    ..Default::default()
+                }),
+                TilePlan::new(w, h, &device.limits(), 1024).unwrap(),
+                &cancel,
+                &completed,
+            )
+            .unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), total);
+            let mut reader = png::Decoder::new(std::io::BufReader::new(
+                std::fs::File::open(&png8_path).unwrap(),
+            ))
+            .read_info()
+            .unwrap();
+            assert_eq!((reader.info().width, reader.info().height), (w, h));
+            assert_eq!(
+                reader.output_color_type(),
+                (png::ColorType::Rgba, png::BitDepth::Eight)
+            );
+            assert!(reader.info().icc_profile.is_some());
+            let expected_rgb = levels.map(|v| {
+                filter_core::color::rec2020_to_linear_srgb([v * 2.0; 3])
+                    .map(|c| filter_core::color::linear_to_srgb(c).clamp(0.0, 1.0) * 255.0)
+            });
+            let expected_alpha = alphas.map(|v| (v * 255.0).round() as u8);
+            for y in 0..h {
+                let row = reader.next_row().unwrap().expect("missing PNG8 row");
+                assert_eq!(row.data().len(), w as usize * 4);
+                for (x, actual) in row.data().as_chunks::<4>().0.iter().enumerate() {
+                    let expected = expected_rgb[((x as u32 / 73 + y / 71) % 4) as usize];
+                    for c in 0..3 {
+                        assert!(
+                            (f32::from(actual[c]) - expected[c]).abs() <= 1.501,
+                            "PNG8 pixel {x},{y}: {actual:?} vs {expected:?}"
+                        );
+                    }
+                    assert_eq!(actual[3], expected_alpha[((x as u32 + y) % 4) as usize]);
+                }
+            }
+            assert!(reader.next_row().unwrap().is_none());
+            reader.finish().unwrap();
+            eprintln!(
+                "Validated {} PNG8 pixels across {total} tiles in {:.2?}",
+                u64::from(w) * u64::from(h),
+                png8_started.elapsed()
+            );
             let jpeg_path = directory.path().join("large.jpg");
             completed.store(0, Ordering::Relaxed);
             let jpeg_started = Instant::now();

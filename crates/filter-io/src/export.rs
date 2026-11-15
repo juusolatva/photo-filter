@@ -24,6 +24,30 @@ impl Default for JpegOptions {
     }
 }
 
+/// PNG channel depth. Both modes preserve straight alpha.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PngBitDepth {
+    Eight,
+    #[default]
+    Sixteen,
+}
+
+/// PNG output settings. Dithering affects only 8-bit RGB, never alpha.
+#[derive(Clone, Copy, Debug)]
+pub struct PngOptions {
+    pub bit_depth: PngBitDepth,
+    pub dither_seed: Option<u64>,
+}
+
+impl Default for PngOptions {
+    fn default() -> Self {
+        Self {
+            bit_depth: PngBitDepth::Sixteen,
+            dither_seed: Some(0),
+        }
+    }
+}
+
 fn normalized_exif(exif: Option<&[u8]>, limit: usize) -> Result<Option<Vec<u8>>> {
     ensure!(
         exif.is_none_or(|bytes| bytes.len() <= limit),
@@ -142,11 +166,11 @@ fn jpeg_pixel(
             rgb[c] * alpha + background * (1.0 - alpha)
         };
         let value = linear_to_srgb(linear).clamp(0.0, 1.0) * 255.0;
-        quantize_jpeg_channel(value, dither_seed, index * 3 + c as u64)
+        quantize_srgb8_channel(value, dither_seed, index * 3 + c as u64)
     })
 }
 
-fn quantize_jpeg_channel(value: f32, dither_seed: Option<u64>, sample: u64) -> u8 {
+fn quantize_srgb8_channel(value: f32, dither_seed: Option<u64>, sample: u64) -> u8 {
     let nearest = value.round();
     // Preserve representable levels, including black/white and clipped values.
     // Allow small transfer/matrix rounding error (less than 0.0001 of a code step).
@@ -198,19 +222,55 @@ pub fn write_srgb16_png_with_exif(
     exif: Option<&[u8]>,
     bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
 ) -> Result<()> {
+    write_srgb_png(output, width, height, exif, PngOptions::default(), bands)
+}
+
+/// Stream already oriented straight linear Rec.2020 bands to RGBA sRGB PNG.
+/// Embeds sRGB ICC and validated, orientation-normalized EXIF. Eight-bit RGB
+/// optionally uses seeded triangular dithering; alpha is rounded without noise.
+/// Sixteen-bit output never dithers. Caller owns atomic file publication.
+pub fn write_srgb_png(
+    output: impl Write,
+    width: u32,
+    height: u32,
+    exif: Option<&[u8]>,
+    options: PngOptions,
+    bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
+) -> Result<()> {
+    write_srgb_png_cancellable(output, width, height, exif, options, bands, || false)
+}
+
+/// Like [`write_srgb_png`], checking cancellation before writing the header,
+/// between bands and at most every 4096 converted pixels. The caller must also
+/// check output writes to interrupt compression and finalization.
+pub fn write_srgb_png_cancellable(
+    output: impl Write,
+    width: u32,
+    height: u32,
+    exif: Option<&[u8]>,
+    options: PngOptions,
+    bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<()> {
+    ensure!(!is_cancelled(), "Export cancelled");
     ensure!(width > 0 && height > 0, "Invalid PNG dimensions");
     let exif = normalized_exif(exif, crate::MAX_METADATA_BYTES)?;
     let mut info = png::Info::with_size(width, height);
     info.color_type = png::ColorType::Rgba;
-    info.bit_depth = png::BitDepth::Sixteen;
+    info.bit_depth = match options.bit_depth {
+        PngBitDepth::Eight => png::BitDepth::Eight,
+        PngBitDepth::Sixteen => png::BitDepth::Sixteen,
+    };
     info.icc_profile = Some(Cow::Owned(ColorProfile::new_srgb().encode()?));
     info.exif_metadata = exif.map(Cow::Owned);
     let mut writer = png::Encoder::with_info(output, info)?.write_header()?;
     let mut remaining = u64::from(width) * u64::from(height);
+    let mut index = 0_u64;
     {
         let mut stream = writer.stream_writer()?;
         let mut bytes = Vec::with_capacity(4096 * 8);
         for band in bands {
+            ensure!(!is_cancelled(), "Export cancelled");
             let band = band?;
             ensure!(
                 band.len() as u64 <= remaining,
@@ -218,22 +278,39 @@ pub fn write_srgb16_png_with_exif(
             );
             remaining -= band.len() as u64;
             for chunk in band.chunks(4096) {
+                ensure!(!is_cancelled(), "Export cancelled");
                 bytes.clear();
                 for pixel in chunk {
                     let [r, g, b, a] = pixel.map(f16::to_f32);
-                    for channel in rec2020_to_linear_srgb([r, g, b])
-                        .map(|c| linear_to_srgb(c).clamp(0.0, 1.0))
-                        .into_iter()
-                        .chain([a.clamp(0.0, 1.0)])
-                    {
-                        bytes
-                            .extend_from_slice(&((channel * 65535.0).round() as u16).to_be_bytes());
+                    let rgb = rec2020_to_linear_srgb([r, g, b])
+                        .map(|c| linear_to_srgb(c).clamp(0.0, 1.0));
+                    let alpha = a.clamp(0.0, 1.0);
+                    match options.bit_depth {
+                        PngBitDepth::Eight => {
+                            for (c, value) in rgb.into_iter().enumerate() {
+                                bytes.push(quantize_srgb8_channel(
+                                    value * 255.0,
+                                    options.dither_seed,
+                                    index * 3 + c as u64,
+                                ));
+                            }
+                            bytes.push((alpha * 255.0).round() as u8);
+                        }
+                        PngBitDepth::Sixteen => {
+                            for channel in rgb.into_iter().chain([alpha]) {
+                                bytes.extend_from_slice(
+                                    &((channel * 65535.0).round() as u16).to_be_bytes(),
+                                );
+                            }
+                        }
                     }
+                    index += 1;
                 }
                 stream.write_all(&bytes)?;
             }
         }
         ensure!(remaining == 0, "Not enough pixels for PNG dimensions");
+        ensure!(!is_cancelled(), "Export cancelled");
         stream.finish()?;
     }
     // Explicit finish propagates final IEND and flush errors (Drop cannot do that).
@@ -284,6 +361,263 @@ mod tests {
         bytes.extend_from_slice(&long(0));
         bytes.extend_from_slice(b"Canon\0");
         bytes
+    }
+
+    fn png_bytes(
+        options: PngOptions,
+        bands: Vec<Result<Vec<[f16; 4]>>>,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let mut output = Vec::new();
+        write_srgb_png(&mut output, width, height, None, options, bands).unwrap();
+        output
+    }
+
+    #[test]
+    fn png8_preserves_straight_color_alpha_and_normalized_metadata() {
+        let options = PngOptions {
+            bit_depth: PngBitDepth::Eight,
+            dither_seed: None,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rgba8.png");
+        let pixels: Vec<_> = [0.0, 0.25, 0.5, 1.0]
+            .into_iter()
+            .map(|alpha| [0.25, 0.25, 0.25, alpha].map(f16::from_f32))
+            .collect();
+        for little_endian in [true, false] {
+            for orientation in 1..=8 {
+                let exif = source_exif(little_endian, Some(orientation));
+                write_srgb_png(
+                    std::fs::File::create(&path).unwrap(),
+                    2,
+                    2,
+                    Some(&exif),
+                    options,
+                    [Ok(pixels.clone())],
+                )
+                .unwrap();
+                let mut decoder =
+                    image::codecs::png::PngDecoder::new(Cursor::new(std::fs::read(&path).unwrap()))
+                        .unwrap();
+                assert_eq!(decoder.color_type(), image::ColorType::Rgba8);
+                assert_eq!(decoder.dimensions(), (2, 2));
+                let profile =
+                    ColorProfile::new_from_slice(&decoder.icc_profile().unwrap().unwrap()).unwrap();
+                let mut expected_profile = ColorProfile::new_srgb();
+                expected_profile.creation_date_time = profile.creation_date_time;
+                assert_eq!(
+                    profile.encode().unwrap(),
+                    expected_profile.encode().unwrap()
+                );
+                let mut normalized = exif.clone();
+                let _ = image::metadata::Orientation::remove_from_exif_chunk(&mut normalized);
+                assert_eq!(decoder.exif_metadata().unwrap().unwrap(), normalized);
+                let rgba = image::DynamicImage::from_decoder(decoder)
+                    .unwrap()
+                    .into_rgba8();
+                for (actual, alpha) in rgba.pixels().zip([0, 64, 128, 255]) {
+                    assert_eq!(actual.0, [137, 137, 137, alpha]);
+                }
+                let reloaded = crate::decode(&path).unwrap();
+                assert_eq!(
+                    reloaded.source_orientation,
+                    image::metadata::Orientation::NoTransforms
+                );
+                assert_eq!((reloaded.buffer.width(), reloaded.buffer.height()), (2, 2));
+                assert_eq!(exif, source_exif(little_endian, Some(orientation)));
+            }
+        }
+    }
+
+    #[test]
+    fn png8_dither_is_seeded_band_independent_and_never_changes_alpha() {
+        let pixels: Vec<_> = (0..131 * 67)
+            .map(|i| [0.18, 0.18, 0.18, [0.0, 0.25, 0.5, 1.0][i % 4]].map(f16::from_f32))
+            .collect();
+        let options = PngOptions {
+            bit_depth: PngBitDepth::Eight,
+            dither_seed: Some(42),
+        };
+        let decode = |bytes: Vec<u8>| image::load_from_memory(&bytes).unwrap().into_rgba8();
+        let first = decode(png_bytes(options, vec![Ok(pixels.clone())], 131, 67));
+        let split = decode(png_bytes(
+            options,
+            pixels.chunks(71).map(|p| Ok(p.to_vec())).collect(),
+            131,
+            67,
+        ));
+        assert_eq!(first, split);
+        let second = decode(png_bytes(
+            PngOptions {
+                dither_seed: Some(43),
+                ..options
+            },
+            vec![Ok(pixels.clone())],
+            131,
+            67,
+        ));
+        assert_ne!(first, second);
+        let plain = decode(png_bytes(
+            PngOptions {
+                dither_seed: None,
+                ..options
+            },
+            vec![Ok(pixels.clone())],
+            131,
+            67,
+        ));
+        let expected = linear_to_srgb(pixels[0][0].to_f32()) * 255.0;
+        let mut sum = 0.0;
+        for (i, ((a, b), p)) in first
+            .pixels()
+            .zip(second.pixels())
+            .zip(plain.pixels())
+            .enumerate()
+        {
+            assert_eq!(a[3], [0, 64, 128, 255][i % 4]);
+            assert_eq!(a[3], b[3]);
+            assert_eq!(a[3], p[3]);
+            assert_eq!(&p.0[..3], &[expected.round() as u8; 3]);
+            for c in 0..3 {
+                assert!((f32::from(a[c]) - expected).abs() <= 1.5);
+                sum += f32::from(a[c]) - expected;
+            }
+        }
+        assert!(sum.abs() / ((pixels.len() * 3) as f32) < 0.02);
+        assert!(
+            first
+                .pixels()
+                .any(|p| p.0[..3] != plain.get_pixel(0, 0).0[..3])
+        );
+        // At 16 bits all dither settings must produce identical decoded pixels.
+        let decode16 = |seed| {
+            image::load_from_memory(&png_bytes(
+                PngOptions {
+                    bit_depth: PngBitDepth::Sixteen,
+                    dither_seed: seed,
+                },
+                vec![Ok(pixels.clone())],
+                131,
+                67,
+            ))
+            .unwrap()
+            .into_rgba16()
+        };
+        assert_eq!(decode16(Some(42)), decode16(None));
+    }
+
+    #[test]
+    fn png8_clips_endpoints_and_handles_nonfinite_samples_without_noise() {
+        let pixels: Vec<_> = [
+            ([-4.0, -4.0, -4.0, -1.0], [0, 0, 0, 0]),
+            ([0.0, 0.0, 0.0, 0.0], [0, 0, 0, 0]),
+            ([1.0, 1.0, 1.0, 1.0], [255; 4]),
+            ([4.0, 4.0, 4.0, 2.0], [255; 4]),
+            ([f32::NAN; 4], [0; 4]),
+        ]
+        .into_iter()
+        .collect();
+        let bytes = png_bytes(
+            PngOptions {
+                bit_depth: PngBitDepth::Eight,
+                ..Default::default()
+            },
+            vec![Ok(pixels
+                .iter()
+                .map(|(p, _)| p.map(f16::from_f32))
+                .collect())],
+            pixels.len() as u32,
+            1,
+        );
+        let rgba = image::load_from_memory(&bytes).unwrap().into_rgba8();
+        for (actual, (_, expected)) in rgba.pixels().zip(pixels) {
+            assert_eq!(actual.0, expected);
+        }
+    }
+
+    #[test]
+    fn png_options_reject_bad_metadata_dimensions_and_streams() {
+        let oversized = vec![0; crate::MAX_METADATA_BYTES + 1];
+        for bit_depth in [PngBitDepth::Eight, PngBitDepth::Sixteen] {
+            let options = PngOptions {
+                bit_depth,
+                ..Default::default()
+            };
+            for (w, h, exif) in [
+                (0, 1, None),
+                (1, 0, None),
+                (1, 1, Some(&[0; 7][..])),
+                (1, 1, Some(oversized.as_slice())),
+            ] {
+                let mut output = Vec::new();
+                assert!(
+                    write_srgb_png(&mut output, w, h, exif, options, [Ok(vec![[f16::ONE; 4]])])
+                        .is_err()
+                );
+                assert!(output.is_empty());
+            }
+            for bands in [
+                vec![Ok(vec![])],
+                vec![Ok(vec![[f16::ONE; 4]; 2])],
+                vec![Err(anyhow::anyhow!("producer failed"))],
+            ] {
+                assert!(write_srgb_png(Vec::new(), 1, 1, None, options, bands).is_err());
+            }
+            let mut output = Vec::new();
+            write_srgb_png(
+                &mut output,
+                1,
+                1,
+                Some(&[]),
+                options,
+                [Ok(vec![[f16::ONE; 4]])],
+            )
+            .unwrap();
+            let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(output)).unwrap();
+            assert!(decoder.exif_metadata().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn png_cancellation_interrupts_conversion_within_a_band() {
+        for bit_depth in [PngBitDepth::Eight, PngBitDepth::Sixteen] {
+            let options = PngOptions {
+                bit_depth,
+                ..Default::default()
+            };
+            let mut checkpoints = 0;
+            let mut output = Vec::new();
+            let error = write_srgb_png_cancellable(
+                &mut output,
+                256,
+                64,
+                None,
+                options,
+                [Ok(vec![[f16::ONE; 4]; 256 * 64])],
+                || {
+                    checkpoints += 1;
+                    checkpoints == 4
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "Export cancelled");
+            assert_eq!(checkpoints, 4);
+            assert!(
+                image::load_from_memory(&output).is_err(),
+                "must not complete the PNG"
+            );
+            let mut output = Vec::new();
+            let bands = std::iter::from_fn(|| -> Option<Result<Vec<[f16; 4]>>> {
+                panic!("must not request pixels")
+            });
+            assert!(
+                write_srgb_png_cancellable(&mut output, 1, 1, None, options, bands, || true)
+                    .is_err()
+            );
+            assert!(output.is_empty());
+        }
     }
 
     #[test]
