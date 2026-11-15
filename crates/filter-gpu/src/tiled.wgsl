@@ -1,5 +1,5 @@
 struct Params {
-    exposure: vec4<f32>,
+    basic: BasicParams,
     // Global pixel origin and full image dimensions, reserved for image-scale stages.
     region: vec4<u32>,
 }
@@ -12,5 +12,5 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(source);
     if any(id.xy >= size) { return; }
     let pixel = textureLoad(source, vec2<i32>(id.xy), 0);
-    textureStore(destination, vec2<i32>(id.xy), apply_exposure(pixel, params.exposure.x));
+    textureStore(destination, vec2<i32>(id.xy), apply_basic(pixel, params.basic));
 }

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+use filter_core::cpu_eval::BasicAdjustments;
 use filter_gpu::{TilePlan, TiledExposure};
 use filter_io::DecodedImage;
 use std::{
@@ -18,7 +19,6 @@ pub enum ExportResult {
 }
 
 pub struct ExportJob {
-    pub ev: f32,
     total: u64,
     completed: Arc<AtomicU64>,
     cancel: Arc<AtomicBool>,
@@ -29,7 +29,7 @@ impl ExportJob {
         device: wgpu::Device,
         queue: wgpu::Queue,
         source: Arc<DecodedImage>,
-        ev: f32,
+        adjustments: BasicAdjustments,
         path: PathBuf,
         ctx: eframe::egui::Context,
     ) -> Result<Self> {
@@ -45,7 +45,6 @@ impl ExportJob {
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, result) = mpsc::channel();
         let job = Self {
-            ev,
             total,
             completed: completed.clone(),
             cancel: cancel.clone(),
@@ -58,7 +57,7 @@ impl ExportJob {
                     &device,
                     &queue,
                     &source.buffer,
-                    ev,
+                    &adjustments,
                     &path,
                     plan,
                     &cancel,
@@ -105,7 +104,7 @@ fn export_png(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     source: &filter_core::ImageBuffer,
-    ev: f32,
+    adjustments: &BasicAdjustments,
     path: &std::path::Path,
     plan: TilePlan,
     cancel: &AtomicBool,
@@ -128,7 +127,8 @@ fn export_png(
             while tiles.peek().is_some_and(|tile| tile.y == first.y) {
                 ensure!(!cancel.load(Ordering::Relaxed), "Export cancelled");
                 let tile = tiles.next().expect("peeked tile");
-                let mut pending = renderer.submit(device, queue, source, tile, ev)?;
+                let mut pending =
+                    renderer.submit_adjusted(device, queue, source, tile, adjustments)?;
                 let started = Instant::now();
                 let pixels = loop {
                     ensure!(!cancel.load(Ordering::Relaxed), "Export cancelled");
@@ -351,7 +351,14 @@ mod tests {
             let total = plan.tile_count();
             let started = Instant::now();
             export_png(
-                &device, &queue, &source, 1.0, &path, plan, &cancel, &completed,
+                &device,
+                &queue,
+                &source,
+                &BasicAdjustments::exposure(1.0).unwrap(),
+                &path,
+                plan,
+                &cancel,
+                &completed,
             )
             .unwrap();
             assert_eq!(completed.load(Ordering::Relaxed), total);

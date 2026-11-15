@@ -1,7 +1,7 @@
 use crate::export::{ExportJob, ExportResult};
 use crate::preview::PreviewCallback;
 use eframe::egui;
-use filter_core::{ImageBuffer, edit::EditState};
+use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments, edit::EditState};
 use filter_gpu::{ExposureRenderer, SourceTexture};
 use filter_io::DecodedImage;
 use std::{
@@ -21,7 +21,7 @@ enum DialogResult {
     Export {
         path: Option<PathBuf>,
         source: Arc<DecodedImage>,
-        ev: f32,
+        adjustments: BasicAdjustments,
     },
 }
 
@@ -126,7 +126,7 @@ impl PhotoApp {
             return;
         };
         self.dialog_open = true;
-        let ev = self.edit.calibration.exposure;
+        let adjustments = BasicAdjustments::new(&self.edit).expect("valid UI edit");
         let tx = self.dialog_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -134,7 +134,11 @@ impl PhotoApp {
                 .add_filter("16-bit PNG", &["png"])
                 .set_file_name("edited.png")
                 .save_file();
-            let _ = tx.send(DialogResult::Export { path, source, ev });
+            let _ = tx.send(DialogResult::Export {
+                path,
+                source,
+                adjustments,
+            });
             ctx.request_repaint();
         });
     }
@@ -150,13 +154,13 @@ impl eframe::App for PhotoApp {
                 DialogResult::Export {
                     path: Some(path),
                     source,
-                    ev,
+                    adjustments,
                 } => {
                     match ExportJob::start(
                         rs.device.clone(),
                         rs.queue.clone(),
                         source,
-                        ev,
+                        adjustments,
                         path,
                         ctx.clone(),
                     ) {
@@ -241,14 +245,33 @@ impl eframe::App for PhotoApp {
             .default_size(220.0)
             .show(ui, |ui| {
                 ui.heading("Basic adjustments");
-                ui.add_enabled(
-                    self.source.is_some(),
-                    egui::Slider::new(&mut self.edit.calibration.exposure, -5.0..=5.0)
-                        .text("Exposure EV"),
-                );
-                if ui.button("Reset exposure").clicked() {
-                    self.edit.calibration.exposure = 0.0;
-                }
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        ui.add_enabled_ui(self.source.is_some(), |ui| {
+                            ui.add(
+                                egui::Slider::new(&mut self.edit.calibration.exposure, -5.0..=5.0)
+                                    .text("Exposure EV"),
+                            );
+                            for (label, value) in [
+                                ("Temperature", &mut self.edit.calibration.temperature),
+                                ("Tint", &mut self.edit.calibration.tint),
+                                ("Brightness", &mut self.edit.tone.brightness),
+                                ("Contrast", &mut self.edit.tone.contrast),
+                                ("Highlights", &mut self.edit.tone.highlights),
+                                ("Shadows", &mut self.edit.tone.shadows),
+                                ("Whites", &mut self.edit.tone.whites),
+                                ("Blacks", &mut self.edit.tone.blacks),
+                                ("Vibrance", &mut self.edit.color.scalars.vibrance),
+                                ("Saturation", &mut self.edit.color.scalars.saturation),
+                            ] {
+                                ui.add(egui::Slider::new(value, -1.0..=1.0).text(label));
+                            }
+                            if ui.button("Reset adjustments").clicked() {
+                                self.edit = EditState::default();
+                            }
+                        });
+                    });
                 ui.separator();
                 if ui
                     .add_enabled(
@@ -262,7 +285,7 @@ impl eframe::App for PhotoApp {
                 ui.label("Full resolution · 16-bit sRGB · preserves alpha");
                 if let Some(export) = &self.export {
                     ui.add(egui::ProgressBar::new(export.progress()).show_percentage());
-                    ui.label(format!("Exporting at {:+.2} EV", export.ev));
+                    ui.label("Exporting captured adjustments");
                     if ui
                         .add_enabled(!export.is_cancelling(), egui::Button::new("Cancel export"))
                         .clicked()
@@ -306,10 +329,10 @@ impl eframe::App for PhotoApp {
                     let extent = visible.size() / image_rect.size();
                     let callback = PreviewCallback {
                         renderer: self.renderer.clone(),
-                        frame: self.renderer.frame_region(
+                        frame: self.renderer.frame_region_adjusted(
                             &rs.device,
                             texture,
-                            self.edit.calibration.exposure,
+                            &BasicAdjustments::new(&self.edit).expect("valid UI edit"),
                             [origin.x, origin.y, extent.x, extent.y],
                         ),
                     };

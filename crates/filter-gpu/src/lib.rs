@@ -1,5 +1,5 @@
-//! GUI-independent GPU exposure spike. Uses the caller's device and queue.
-use filter_core::ImageBuffer;
+//! GUI-independent basic pointwise GPU renderer. Uses the caller's device and queue.
+use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments};
 use wgpu::util::DeviceExt;
 
 mod tiled;
@@ -163,18 +163,27 @@ impl ExposureRenderer {
         ev: f32,
         uv: [f32; 4],
     ) -> ExposureFrame {
+        self.frame_region_adjusted(
+            device,
+            source,
+            &BasicAdjustments::exposure(ev).expect("valid exposure"),
+            uv,
+        )
+    }
+    /// Render a validated basic-adjustment snapshot over a UV region.
+    pub fn frame_region_adjusted(
+        &self,
+        device: &wgpu::Device,
+        source: &SourceTexture,
+        adjustments: &BasicAdjustments,
+        uv: [f32; 4],
+    ) -> ExposureFrame {
+        let mut params = adjustments.uniform_rows().to_vec();
+        params.push([if self.target_is_srgb { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]);
+        params.push(uv);
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("exposure parameters"),
-            contents: bytemuck::cast_slice(&[
-                ev,
-                if self.target_is_srgb { 1.0_f32 } else { 0.0 },
-                0.0,
-                0.0,
-                uv[0],
-                uv[1],
-                uv[2],
-                uv[3],
-            ]),
+            contents: bytemuck::cast_slice(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

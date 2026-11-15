@@ -1,6 +1,6 @@
-//! One-tile-per-submit working-space exposure and asynchronous, row-padded readback.
+//! One-tile-per-submit working-space basic adjustments and asynchronous, row-padded readback.
 use anyhow::{Context, Result, bail, ensure};
-use filter_core::ImageBuffer;
+use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments};
 use half::f16;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use wgpu::util::DeviceExt;
@@ -110,7 +110,23 @@ impl TiledExposure {
         tile: Tile,
         ev: f32,
     ) -> Result<PendingTile> {
-        ensure!(ev.is_finite(), "Exposure must be finite");
+        self.submit_adjusted(
+            device,
+            queue,
+            source,
+            tile,
+            &BasicAdjustments::exposure(ev)?,
+        )
+    }
+    /// Apply the same validated snapshot as the viewport, without waiting for readback.
+    pub fn submit_adjusted(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        source: &ImageBuffer,
+        tile: Tile,
+        adjustments: &BasicAdjustments,
+    ) -> Result<PendingTile> {
         ensure!(
             tile.width > 0
                 && tile.height > 0
@@ -180,7 +196,7 @@ impl TiledExposure {
             },
             extent,
         );
-        let mut params = Vec::from(bytemuck::cast_slice(&[ev, 0.0_f32, 0.0, 0.0]));
+        let mut params = Vec::from(bytemuck::cast_slice(adjustments.uniform_rows()));
         params.extend_from_slice(bytemuck::cast_slice(&[
             tile.x,
             tile.y,

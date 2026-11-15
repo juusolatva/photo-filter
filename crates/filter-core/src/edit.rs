@@ -1,5 +1,5 @@
-//! Concrete edit parameters. The current renderer only consumes calibration.exposure;
-//! the remaining sections establish the preset contract for subsequent engine work.
+//! Concrete edit parameters. Basic calibration, tone (except clarity), vibrance and
+//! saturation render today; other sections reserve their preset contracts.
 use crate::pipeline::FilterNode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -350,6 +350,24 @@ impl EditState {
         self.calibration.validate()?;
         if !(-5.0..=5.0).contains(&self.calibration.exposure) {
             return Err(ModelError("exposure must be between -5 and +5 EV".into()));
+        }
+        for value in [
+            self.calibration.temperature,
+            self.calibration.tint,
+            self.tone.brightness,
+            self.tone.contrast,
+            self.tone.highlights,
+            self.tone.shadows,
+            self.tone.whites,
+            self.tone.blacks,
+            self.color.scalars.vibrance,
+            self.color.scalars.saturation,
+        ] {
+            if !(-1.0..=1.0).contains(&value) {
+                return Err(ModelError(
+                    "basic adjustments must be between -1 and +1".into(),
+                ));
+            }
         }
         self.tone.validate()?;
         self.curves.validate()?;

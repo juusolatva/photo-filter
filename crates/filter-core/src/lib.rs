@@ -5,3 +5,5 @@ pub mod edit;
 pub mod pipeline;
 pub mod preset;
 pub use buffer::ImageBuffer;
+
+pub mod cpu_eval;
