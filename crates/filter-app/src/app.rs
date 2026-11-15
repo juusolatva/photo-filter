@@ -37,6 +37,14 @@ enum DialogResult {
     },
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ExportKind {
+    #[default]
+    Png,
+    Jpeg,
+    WebP,
+}
+
 pub struct PhotoApp {
     renderer: Arc<ExposureRenderer>,
     source: Option<Arc<DecodedImage>>,
@@ -56,9 +64,10 @@ pub struct PhotoApp {
     pan: egui::Vec2,
     export: Option<ExportJob>,
     export_status: String,
-    export_jpeg: bool,
+    export_kind: ExportKind,
     jpeg_options: filter_io::JpegOptions,
     png_options: filter_io::PngOptions,
+    webp_options: filter_io::WebPOptions,
 }
 impl PhotoApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
@@ -110,9 +119,10 @@ impl PhotoApp {
             pan: egui::Vec2::ZERO,
             export: None,
             export_status: String::new(),
-            export_jpeg: false,
+            export_kind: ExportKind::default(),
             jpeg_options: filter_io::JpegOptions::default(),
             png_options: filter_io::PngOptions::default(),
+            webp_options: filter_io::WebPOptions::default(),
         };
         if let Some(path) = path {
             app.open(path);
@@ -215,10 +225,10 @@ impl PhotoApp {
                 return;
             }
         };
-        let format = if self.export_jpeg {
-            ExportFormat::Jpeg(self.jpeg_options)
-        } else {
-            ExportFormat::Png(self.png_options)
+        let format = match self.export_kind {
+            ExportKind::Jpeg => ExportFormat::Jpeg(self.jpeg_options),
+            ExportKind::Png => ExportFormat::Png(self.png_options),
+            ExportKind::WebP => ExportFormat::WebP(self.webp_options),
         };
         self.dialog_open = true;
         let tx = self.dialog_tx.clone();
@@ -227,6 +237,7 @@ impl PhotoApp {
             let extensions: &[&str] = match format {
                 ExportFormat::Png(_) => &["png"],
                 ExportFormat::Jpeg(_) => &["jpg", "jpeg"],
+                ExportFormat::WebP(_) => &["webp"],
             };
             let path = rfd::FileDialog::new()
                 .add_filter(format.label(), extensions)
@@ -413,10 +424,11 @@ impl eframe::App for PhotoApp {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label("Format");
-                        ui.selectable_value(&mut self.export_jpeg, false, "PNG");
-                        ui.selectable_value(&mut self.export_jpeg, true, "JPEG");
+                        ui.selectable_value(&mut self.export_kind, ExportKind::Png, "PNG");
+                        ui.selectable_value(&mut self.export_kind, ExportKind::Jpeg, "JPEG");
+                        ui.selectable_value(&mut self.export_kind, ExportKind::WebP, "WebP");
                     });
-                    if self.export_jpeg {
+                    if self.export_kind == ExportKind::Jpeg {
                         ui.add(
                             egui::Slider::new(&mut self.jpeg_options.quality, 1..=100)
                                 .text("Quality"),
@@ -430,6 +442,12 @@ impl eframe::App for PhotoApp {
                             self.jpeg_options.dither_seed = dither.then_some(0);
                         }
                         ui.label("Full resolution · 8-bit sRGB · flattened alpha");
+                    } else if self.export_kind == ExportKind::WebP {
+                        let mut dither = self.webp_options.dither_seed.is_some();
+                        if ui.checkbox(&mut dither, "Dither 8-bit output").changed() {
+                            self.webp_options.dither_seed = dither.then_some(0);
+                        }
+                        ui.label("Full resolution · lossless 8-bit sRGB · preserves alpha");
                     } else {
                         ui.horizontal(|ui| {
                             ui.label("Bit depth");

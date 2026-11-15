@@ -48,6 +48,108 @@ impl Default for PngOptions {
     }
 }
 
+/// Lossless WebP settings. Dithering affects 8-bit RGB, never straight alpha.
+#[derive(Clone, Copy, Debug)]
+pub struct WebPOptions {
+    pub dither_seed: Option<u64>,
+}
+
+impl Default for WebPOptions {
+    fn default() -> Self {
+        Self {
+            dither_seed: Some(0),
+        }
+    }
+}
+
+/// Encode oriented straight linear Rec.2020 bands as lossless 8-bit sRGB WebP.
+/// Losslessness applies after output color conversion and quantization. Embeds
+/// sRGB ICC and validated, orientation-normalized EXIF (at most 16 MiB).
+/// Dimensions must be 1..=16384. Uses a fallibly allocated RGBA8 buffer capped
+/// at 512 MiB, plus the current band and the encoder's internal buffers.
+/// Caller owns atomic publication and cancellation of output writes.
+pub fn write_srgb8_webp(
+    output: impl Write,
+    width: u32,
+    height: u32,
+    exif: Option<&[u8]>,
+    options: WebPOptions,
+    bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
+) -> Result<()> {
+    write_srgb8_webp_cancellable(output, width, height, exif, options, bands, || false)
+}
+
+/// Like [`write_srgb8_webp`], checking cancellation before allocation, between
+/// bands, at most every 4096 converted pixels, and before encoding. The encoder
+/// compresses the entire frame internally before its first output write; that
+/// pass cannot be interrupted. Caller must check writes and publication too.
+pub fn write_srgb8_webp_cancellable(
+    mut output: impl Write,
+    width: u32,
+    height: u32,
+    exif: Option<&[u8]>,
+    options: WebPOptions,
+    bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<()> {
+    ensure!(!is_cancelled(), "Export cancelled");
+    ensure!(
+        (1..=16384).contains(&width) && (1..=16384).contains(&height),
+        "WebP dimensions must be between 1 and 16384"
+    );
+    let count = u64::from(width) * u64::from(height);
+    ensure!(
+        count * 4 <= 512 * 1024 * 1024,
+        "WebP RGBA buffer exceeds the 512 MiB limit"
+    );
+    let exif = normalized_exif(exif, crate::MAX_METADATA_BYTES)?;
+    let mut rgba = Vec::new();
+    rgba.try_reserve_exact(count as usize * 4)
+        .context("Could not allocate WebP RGBA buffer")?;
+    let mut remaining = count;
+    for band in bands {
+        ensure!(!is_cancelled(), "Export cancelled");
+        let band = band?;
+        ensure!(
+            band.len() as u64 <= remaining,
+            "Too many pixels for WebP dimensions"
+        );
+        remaining -= band.len() as u64;
+        for chunk in band.chunks(4096) {
+            ensure!(!is_cancelled(), "Export cancelled");
+            for &pixel in chunk {
+                let index = rgba.len() as u64 / 4;
+                rgba.extend_from_slice(&straight_srgb8_pixel(pixel, options.dither_seed, index));
+            }
+        }
+    }
+    ensure!(remaining == 0, "Not enough pixels for WebP dimensions");
+    ensure!(!is_cancelled(), "Export cancelled");
+    let mut encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut output);
+    encoder.set_icc_profile(ColorProfile::new_srgb().encode()?)?;
+    if let Some(exif) = exif {
+        encoder.set_exif_metadata(exif)?;
+    }
+    encoder.write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)?;
+    output.flush()?;
+    Ok(())
+}
+
+fn straight_srgb8_pixel(pixel: [f16; 4], seed: Option<u64>, index: u64) -> [u8; 4] {
+    let [r, g, b, a] = pixel.map(f16::to_f32);
+    let rgb = rec2020_to_linear_srgb([r, g, b]);
+    let mut output = [0; 4];
+    for c in 0..3 {
+        output[c] = quantize_srgb8_channel(
+            linear_to_srgb(rgb[c]).clamp(0.0, 1.0) * 255.0,
+            seed,
+            index * 3 + c as u64,
+        );
+    }
+    output[3] = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    output
+}
+
 fn normalized_exif(exif: Option<&[u8]>, limit: usize) -> Result<Option<Vec<u8>>> {
     ensure!(
         exif.is_none_or(|bytes| bytes.len() <= limit),
@@ -281,22 +383,19 @@ pub fn write_srgb_png_cancellable(
                 ensure!(!is_cancelled(), "Export cancelled");
                 bytes.clear();
                 for pixel in chunk {
-                    let [r, g, b, a] = pixel.map(f16::to_f32);
-                    let rgb = rec2020_to_linear_srgb([r, g, b])
-                        .map(|c| linear_to_srgb(c).clamp(0.0, 1.0));
-                    let alpha = a.clamp(0.0, 1.0);
                     match options.bit_depth {
                         PngBitDepth::Eight => {
-                            for (c, value) in rgb.into_iter().enumerate() {
-                                bytes.push(quantize_srgb8_channel(
-                                    value * 255.0,
-                                    options.dither_seed,
-                                    index * 3 + c as u64,
-                                ));
-                            }
-                            bytes.push((alpha * 255.0).round() as u8);
+                            bytes.extend_from_slice(&straight_srgb8_pixel(
+                                *pixel,
+                                options.dither_seed,
+                                index,
+                            ));
                         }
                         PngBitDepth::Sixteen => {
+                            let [r, g, b, a] = pixel.map(f16::to_f32);
+                            let rgb = rec2020_to_linear_srgb([r, g, b])
+                                .map(|c| linear_to_srgb(c).clamp(0.0, 1.0));
+                            let alpha = a.clamp(0.0, 1.0);
                             for channel in rgb.into_iter().chain([alpha]) {
                                 bytes.extend_from_slice(
                                     &((channel * 65535.0).round() as u16).to_be_bytes(),
@@ -372,6 +471,221 @@ mod tests {
         let mut output = Vec::new();
         write_srgb_png(&mut output, width, height, None, options, bands).unwrap();
         output
+    }
+
+    #[test]
+    fn webp_preserves_straight_rgba_and_normalized_metadata() {
+        let pixels: Vec<_> = [0.0, 0.25, 0.5, 1.0]
+            .into_iter()
+            .map(|a| [0.25, 0.25, 0.25, a].map(f16::from_f32))
+            .collect();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("straight.webp");
+        for little_endian in [true, false] {
+            for orientation in 1..=8 {
+                let source = source_exif(little_endian, Some(orientation));
+                write_srgb8_webp(
+                    std::fs::File::create(&path).unwrap(),
+                    2,
+                    2,
+                    Some(&source),
+                    WebPOptions { dither_seed: None },
+                    [Ok(pixels.clone())],
+                )
+                .unwrap();
+                let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(
+                    std::fs::read(&path).unwrap(),
+                ))
+                .unwrap();
+                assert_eq!(decoder.dimensions(), (2, 2));
+                assert_eq!(decoder.color_type(), image::ColorType::Rgba8);
+                let profile =
+                    ColorProfile::new_from_slice(&decoder.icc_profile().unwrap().unwrap()).unwrap();
+                let mut expected = ColorProfile::new_srgb();
+                expected.creation_date_time = profile.creation_date_time;
+                assert_eq!(profile.encode().unwrap(), expected.encode().unwrap());
+                let mut normalized = source.clone();
+                let _ = image::metadata::Orientation::remove_from_exif_chunk(&mut normalized);
+                assert_eq!(decoder.exif_metadata().unwrap().unwrap(), normalized);
+                let rgba = image::DynamicImage::from_decoder(decoder)
+                    .unwrap()
+                    .into_rgba8();
+                for (actual, alpha) in rgba.pixels().zip([0, 64, 128, 255]) {
+                    assert_eq!(actual.0, [137, 137, 137, alpha]);
+                }
+                let reloaded = crate::decode(&path).unwrap();
+                assert_eq!(
+                    reloaded.source_orientation,
+                    image::metadata::Orientation::NoTransforms
+                );
+                assert_eq!((reloaded.buffer.width(), reloaded.buffer.height()), (2, 2));
+                assert_eq!(source, source_exif(little_endian, Some(orientation)));
+            }
+        }
+    }
+
+    #[test]
+    fn webp_is_lossless_after_quantization_independent_of_band_boundaries() {
+        let pixels: Vec<_> = (0..131 * 67)
+            .map(|i| {
+                let value = (i % 257) as f32 / 256.0;
+                [value, 0.18, 1.0 - value, [0.0, 0.25, 0.5, 1.0][i % 4]].map(f16::from_f32)
+            })
+            .collect();
+        let mut previous = None;
+        for seed in [None, Some(0), Some(42)] {
+            let expected = image::load_from_memory(&png_bytes(
+                PngOptions {
+                    bit_depth: PngBitDepth::Eight,
+                    dither_seed: seed,
+                },
+                vec![Ok(pixels.clone())],
+                131,
+                67,
+            ))
+            .unwrap()
+            .into_rgba8();
+            for band_size in [71, pixels.len()] {
+                let mut output = Vec::new();
+                write_srgb8_webp(
+                    &mut output,
+                    131,
+                    67,
+                    None,
+                    WebPOptions { dither_seed: seed },
+                    pixels.chunks(band_size).map(|p| Ok(p.to_vec())),
+                )
+                .unwrap();
+                let actual = image::load_from_memory(&output).unwrap().into_rgba8();
+                assert_eq!(
+                    actual, expected,
+                    "WebP must retain every quantized RGBA byte"
+                );
+                for (i, p) in actual.pixels().enumerate() {
+                    assert_eq!(p[3], [0, 64, 128, 255][i % 4]);
+                }
+            }
+            if let Some(previous) = previous {
+                assert_ne!(expected, previous);
+            }
+            previous = Some(expected);
+        }
+    }
+
+    #[test]
+    fn webp_validates_limits_metadata_and_pixel_stream_before_writing() {
+        let oversized = vec![0; crate::MAX_METADATA_BYTES + 1];
+        for (w, h, exif) in [
+            (0, 1, None),
+            (1, 0, None),
+            (16385, 1, None),
+            (1, 16385, None),
+            (16384, 8193, None), // Four-byte output exceeds 512 MiB.
+            (1, 1, Some(&[0; 7][..])),
+            (1, 1, Some(oversized.as_slice())),
+        ] {
+            let bands = std::iter::from_fn(|| -> Option<Result<Vec<[f16; 4]>>> {
+                panic!("invalid inputs must fail before requesting pixels")
+            });
+            let mut output = Vec::new();
+            assert!(
+                write_srgb8_webp(&mut output, w, h, exif, WebPOptions::default(), bands).is_err()
+            );
+            assert!(output.is_empty());
+        }
+        for bands in [
+            vec![Ok(vec![])],
+            vec![Ok(vec![[f16::ONE; 4]; 2])],
+            vec![Err(anyhow::anyhow!("producer failed"))],
+        ] {
+            let mut output = Vec::new();
+            assert!(
+                write_srgb8_webp(&mut output, 1, 1, None, WebPOptions::default(), bands).is_err()
+            );
+            assert!(output.is_empty());
+        }
+        for (w, h) in [(16384, 1), (1, 16384)] {
+            let mut output = Vec::new();
+            write_srgb8_webp(
+                &mut output,
+                w,
+                h,
+                Some(&[]),
+                WebPOptions::default(),
+                [Ok(vec![[f16::ONE; 4]; (w * h) as usize])],
+            )
+            .unwrap();
+            let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(output)).unwrap();
+            assert_eq!(decoder.dimensions(), (w, h));
+            assert!(decoder.exif_metadata().unwrap().is_none());
+            let rgba = image::DynamicImage::from_decoder(decoder)
+                .unwrap()
+                .into_rgba8();
+            assert!(rgba.pixels().all(|p| p.0 == [255; 4]));
+        }
+    }
+
+    #[test]
+    fn webp_cancellation_interrupts_conversion_and_prevents_encoding() {
+        for cancel_at in [1, 4, 7] {
+            let mut checkpoints = 0;
+            let mut output = Vec::new();
+            let bands = std::iter::once_with(|| {
+                assert!(cancel_at > 1, "initial cancellation must not consume bands");
+                Ok(vec![[f16::ONE; 4]; 256 * 64])
+            });
+            let error = write_srgb8_webp_cancellable(
+                &mut output,
+                256,
+                64,
+                None,
+                WebPOptions::default(),
+                bands,
+                || {
+                    checkpoints += 1;
+                    checkpoints == cancel_at
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "Export cancelled");
+            assert_eq!(checkpoints, cancel_at);
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
+    fn webp_propagates_output_and_flush_failures() {
+        struct FailingWriter {
+            fail_on_flush: bool,
+        }
+        impl Write for FailingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.fail_on_flush {
+                    Ok(bytes.len())
+                } else {
+                    Err(std::io::Error::other("write failed"))
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("flush failed"))
+            }
+        }
+        for fail_on_flush in [false, true] {
+            let error = write_srgb8_webp(
+                FailingWriter { fail_on_flush },
+                1,
+                1,
+                None,
+                WebPOptions::default(),
+                [Ok(vec![[f16::ONE; 4]])],
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(if fail_on_flush {
+                "flush failed"
+            } else {
+                "write failed"
+            }));
+        }
     }
 
     #[test]
@@ -509,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn png8_clips_endpoints_and_handles_nonfinite_samples_without_noise() {
+    fn png8_and_webp_clip_endpoints_and_handle_nonfinite_samples_without_noise() {
         let pixels: Vec<_> = [
             ([-4.0, -4.0, -4.0, -1.0], [0, 0, 0, 0]),
             ([0.0, 0.0, 0.0, 0.0], [0, 0, 0, 0]),
@@ -531,9 +845,24 @@ mod tests {
             pixels.len() as u32,
             1,
         );
-        let rgba = image::load_from_memory(&bytes).unwrap().into_rgba8();
-        for (actual, (_, expected)) in rgba.pixels().zip(pixels) {
-            assert_eq!(actual.0, expected);
+        let mut webp = Vec::new();
+        write_srgb8_webp(
+            &mut webp,
+            pixels.len() as u32,
+            1,
+            None,
+            WebPOptions::default(),
+            [Ok(pixels
+                .iter()
+                .map(|(p, _)| p.map(f16::from_f32))
+                .collect())],
+        )
+        .unwrap();
+        for encoded in [bytes, webp] {
+            let rgba = image::load_from_memory(&encoded).unwrap().into_rgba8();
+            for (actual, (_, expected)) in rgba.pixels().zip(&pixels) {
+                assert_eq!(actual.0, *expected);
+            }
         }
     }
 
