@@ -6,6 +6,9 @@ use image::{ImageDecoder, ImageReader, metadata::Orientation};
 use moxcms::{ColorProfile, DataColorSpace, Layout, ToneReprCurve, TransformOptions};
 use std::path::Path;
 
+mod export;
+pub use export::write_srgb16_png;
+
 pub struct DecodedImage {
     pub buffer: ImageBuffer,
     pub source_orientation: Orientation,

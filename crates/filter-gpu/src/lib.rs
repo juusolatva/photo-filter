@@ -2,6 +2,18 @@
 use filter_core::ImageBuffer;
 use wgpu::util::DeviceExt;
 
+mod tiled;
+pub use tiled::{PendingTile, Tile, TilePlan, TiledExposure};
+
+fn exposure_shader(device: &wgpu::Device, body: &str) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("exposure shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            format!("{}\n{body}", include_str!("working.wgsl")).into(),
+        ),
+    })
+}
+
 pub struct ExposureRenderer {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -47,7 +59,7 @@ impl ExposureRenderer {
                 },
             ],
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("exposure.wgsl"));
+        let shader = exposure_shader(device, include_str!("exposure.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("exposure layout"),
             bind_group_layouts: &[Some(&layout)],

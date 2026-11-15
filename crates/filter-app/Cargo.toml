@@ -14,3 +14,4 @@ egui-wgpu.workspace = true
 wgpu.workspace = true
 rfd.workspace = true
 bytemuck.workspace = true
+tempfile.workspace = true

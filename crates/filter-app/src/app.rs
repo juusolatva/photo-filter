@@ -1,3 +1,4 @@
+use crate::export::{ExportJob, ExportResult};
 use crate::preview::PreviewCallback;
 use eframe::egui;
 use filter_core::ImageBuffer;
@@ -15,14 +16,23 @@ type LoadResult = (
     Result<(Arc<DecodedImage>, ImageBuffer), String>,
 );
 
+enum DialogResult {
+    Open(Option<PathBuf>),
+    Export {
+        path: Option<PathBuf>,
+        source: Arc<DecodedImage>,
+        ev: f32,
+    },
+}
+
 pub struct PhotoApp {
     renderer: Arc<ExposureRenderer>,
     source: Option<Arc<DecodedImage>>,
     texture: Option<SourceTexture>,
     load_tx: mpsc::Sender<(u64, PathBuf)>,
     load_rx: mpsc::Receiver<LoadResult>,
-    dialog_tx: mpsc::Sender<Option<PathBuf>>,
-    dialog_rx: mpsc::Receiver<Option<PathBuf>>,
+    dialog_tx: mpsc::Sender<DialogResult>,
+    dialog_rx: mpsc::Receiver<DialogResult>,
     dialog_open: bool,
     generation: u64,
     loading: bool,
@@ -30,6 +40,8 @@ pub struct PhotoApp {
     ev: f32,
     zoom: f32,
     pan: egui::Vec2,
+    export: Option<ExportJob>,
+    export_status: String,
 }
 impl PhotoApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
@@ -77,6 +89,8 @@ impl PhotoApp {
             ev: 0.0,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
+            export: None,
+            export_status: String::new(),
         };
         if let Some(path) = path {
             app.open(path);
@@ -100,7 +114,27 @@ impl PhotoApp {
             let path = rfd::FileDialog::new()
                 .add_filter("Images", &["jpg", "jpeg", "png", "webp", "tif", "tiff"])
                 .pick_file();
-            let _ = tx.send(path);
+            let _ = tx.send(DialogResult::Open(path));
+            ctx.request_repaint();
+        });
+    }
+    fn export_dialog(&mut self, ctx: &egui::Context) {
+        if self.dialog_open || self.export.is_some() {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        self.dialog_open = true;
+        let ev = self.ev;
+        let tx = self.dialog_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let path = rfd::FileDialog::new()
+                .add_filter("16-bit PNG", &["png"])
+                .set_file_name("edited.png")
+                .save_file();
+            let _ = tx.send(DialogResult::Export { path, source, ev });
             ctx.request_repaint();
         });
     }
@@ -108,13 +142,44 @@ impl PhotoApp {
 impl eframe::App for PhotoApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        while let Ok(path) = self.dialog_rx.try_recv() {
+        let rs = frame.wgpu_render_state().expect("wgpu renderer configured");
+        while let Ok(result) = self.dialog_rx.try_recv() {
             self.dialog_open = false;
-            if let Some(path) = path {
-                self.open(path);
+            match result {
+                DialogResult::Open(Some(path)) => self.open(path),
+                DialogResult::Export {
+                    path: Some(path),
+                    source,
+                    ev,
+                } => {
+                    match ExportJob::start(
+                        rs.device.clone(),
+                        rs.queue.clone(),
+                        source,
+                        ev,
+                        path,
+                        ctx.clone(),
+                    ) {
+                        Ok(job) => {
+                            self.export = Some(job);
+                            self.export_status.clear();
+                        }
+                        Err(error) => {
+                            self.export_status = format!("Could not start export: {error:#}")
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        let rs = frame.wgpu_render_state().expect("wgpu renderer configured");
+        if let Some(result) = self.export.as_ref().and_then(ExportJob::try_result) {
+            self.export = None;
+            self.export_status = match result {
+                ExportResult::Saved(path) => format!("Exported {}", path.display()),
+                ExportResult::Cancelled => "Export cancelled".into(),
+                ExportResult::Failed(error) => format!("Export failed: {error}"),
+            };
+        }
         while let Ok((generation, path, result)) = self.load_rx.try_recv() {
             if generation != self.generation {
                 continue;
@@ -184,7 +249,32 @@ impl eframe::App for PhotoApp {
                     self.ev = 0.0;
                 }
                 ui.separator();
-                ui.label("Phase 0 · GPU exposure preview");
+                if ui
+                    .add_enabled(
+                        self.source.is_some() && !self.dialog_open && self.export.is_none(),
+                        egui::Button::new("Export PNG…"),
+                    )
+                    .clicked()
+                {
+                    self.export_dialog(&ctx);
+                }
+                ui.label("Full resolution · 16-bit sRGB · preserves alpha");
+                if let Some(export) = &self.export {
+                    ui.add(egui::ProgressBar::new(export.progress()).show_percentage());
+                    ui.label(format!("Exporting at {:+.2} EV", export.ev));
+                    if ui
+                        .add_enabled(!export.is_cancelling(), egui::Button::new("Cancel export"))
+                        .clicked()
+                    {
+                        export.cancel();
+                    }
+                    if export.is_cancelling() {
+                        ui.label("Cancelling…");
+                    }
+                }
+                if !self.export_status.is_empty() {
+                    ui.label(&self.export_status);
+                }
             });
         egui::CentralPanel::default().show(ui, |ui| {
             let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
@@ -237,7 +327,7 @@ impl eframe::App for PhotoApp {
             }
         });
         let _ = rs.device.poll(wgpu::PollType::Poll);
-        if self.loading {
+        if self.loading || self.export.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }

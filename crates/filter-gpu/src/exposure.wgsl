@@ -13,7 +13,7 @@ fn encode(c:vec3<f32>) -> vec3<f32> {
 }
 @fragment fn fs_main(in:VertexOut) -> @location(0) vec4<f32> {
     let sample = textureSample(source,source_sampler,params.uv_rect.xy + in.uv * params.uv_rect.zw);
-    let working = sample.rgb / max(sample.a,0.000001) * exp2(params.ev);
+    let working = apply_exposure(vec4(sample.rgb / max(sample.a,0.000001),sample.a),params.ev).rgb;
     let rgb = vec3(dot(working,vec3(1.660491,-0.587641,-0.072850)),dot(working,vec3(-0.124550,1.132900,-0.008349)),dot(working,vec3(-0.018151,-0.100579,1.118730)));
     let checker = select(0.18,0.28, (u32(in.position.x/12.0)+u32(in.position.y/12.0))%2u==0u);
     // Initial spike uses display clipping. Perceptual gamut compression is a later phase.
