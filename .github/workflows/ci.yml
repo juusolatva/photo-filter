@@ -144,6 +144,9 @@ jobs:
       - name: SonarQube Scan
         if: env.SONAR_ANALYSIS == 'true'
         uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        with:
+          # Command-line properties override the checked-out project configuration.
+          args: -Dsonar.host.url=https://sonarcloud.io
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
