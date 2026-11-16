@@ -20,4 +20,5 @@ tempfile.workspace = true
 image.workspace = true
 half.workspace = true
 png.workspace = true
+tiff.workspace = true
 pollster = "1"

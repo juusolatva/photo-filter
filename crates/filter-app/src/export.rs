@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, ensure};
 use filter_core::cpu_eval::BasicAdjustments;
 use filter_gpu::{TilePlan, TiledExposure};
-use filter_io::{DecodedImage, JpegOptions, PngBitDepth, PngOptions, WebPOptions};
-use std::io::Write;
+use filter_io::{
+    DecodedImage, JpegOptions, PngBitDepth, PngOptions, TiffBitDepth, TiffOptions, WebPOptions,
+};
+use std::io::{Seek, Write};
 use std::{
     path::PathBuf,
     sync::{
@@ -18,6 +20,7 @@ pub enum ExportFormat {
     Png(PngOptions),
     Jpeg(JpegOptions),
     WebP(WebPOptions),
+    Tiff(TiffOptions),
 }
 impl ExportFormat {
     pub fn extension(self) -> &'static str {
@@ -25,6 +28,7 @@ impl ExportFormat {
             Self::Png(_) => "png",
             Self::Jpeg(_) => "jpg",
             Self::WebP(_) => "webp",
+            Self::Tiff(_) => "tiff",
         }
     }
     pub fn label(self) -> &'static str {
@@ -35,6 +39,10 @@ impl ExportFormat {
             },
             Self::Jpeg(_) => "JPEG",
             Self::WebP(_) => "Lossless WebP",
+            Self::Tiff(options) => match options.bit_depth {
+                TiffBitDepth::Eight => "8-bit TIFF",
+                TiffBitDepth::Sixteen => "16-bit TIFF",
+            },
         }
     }
     fn validate_path(self, path: &std::path::Path) -> Result<()> {
@@ -45,6 +53,9 @@ impl ExportFormat {
         let valid = match self {
             Self::Png(_) => extension.eq_ignore_ascii_case("png"),
             Self::WebP(_) => extension.eq_ignore_ascii_case("webp"),
+            Self::Tiff(_) => {
+                extension.eq_ignore_ascii_case("tif") || extension.eq_ignore_ascii_case("tiff")
+            }
             Self::Jpeg(_) => {
                 extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg")
             }
@@ -57,6 +68,7 @@ impl ExportFormat {
                 Self::Png(_) => ".png",
                 Self::Jpeg(_) => ".jpg or .jpeg",
                 Self::WebP(_) => ".webp",
+                Self::Tiff(_) => ".tif or .tiff",
             }
         );
         Ok(())
@@ -252,6 +264,14 @@ fn export_image(
                 bands,
                 || cancel.load(Ordering::Relaxed),
             )?,
+            ExportFormat::Tiff(options) => filter_io::write_srgb_tiff_cancellable(
+                &mut output,
+                source.width(),
+                source.height(),
+                options,
+                bands,
+                || cancel.load(Ordering::Relaxed),
+            )?,
         }
         output.flush()?;
         Ok(())
@@ -317,6 +337,14 @@ fn publish_export(
 struct CancelWriter<'a, W> {
     output: W,
     cancel: &'a AtomicBool,
+}
+impl<W: Seek> Seek for CancelWriter<'_, W> {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::other("Export cancelled"));
+        }
+        self.output.seek(position)
+    }
 }
 impl<W: Write> Write for CancelWriter<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -387,6 +415,24 @@ mod tests {
     }
 
     #[test]
+    fn tiff_accepts_both_extensions_case_insensitively() {
+        for bit_depth in [TiffBitDepth::Eight, TiffBitDepth::Sixteen] {
+            let format = ExportFormat::Tiff(TiffOptions {
+                bit_depth,
+                ..Default::default()
+            });
+            assert_eq!(format.extension(), "tiff");
+            assert!(format.label().contains("TIFF"));
+            for path in ["photo.tif", "photo.TIFF", "photo.TIF", "photo.tiff"] {
+                assert!(format.validate_path(std::path::Path::new(path)).is_ok());
+            }
+            for path in ["photo.png", "photo.jpg", "photo.webp", "photo"] {
+                assert!(format.validate_path(std::path::Path::new(path)).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn cancellation_during_encoding_preserves_destination() {
         struct CancelAfterWrite<'a> {
             file: &'a mut std::fs::File,
@@ -402,6 +448,11 @@ mod tests {
                 self.file.flush()
             }
         }
+        impl Seek for CancelAfterWrite<'_> {
+            fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.file.seek(position)
+            }
+        }
         let directory = tempfile::tempdir().unwrap();
         for format in [
             ExportFormat::Png(PngOptions {
@@ -411,6 +462,11 @@ mod tests {
             ExportFormat::Png(PngOptions::default()),
             ExportFormat::Jpeg(JpegOptions::default()),
             ExportFormat::WebP(WebPOptions::default()),
+            ExportFormat::Tiff(TiffOptions {
+                bit_depth: TiffBitDepth::Eight,
+                ..Default::default()
+            }),
+            ExportFormat::Tiff(TiffOptions::default()),
         ] {
             let path = directory
                 .path()
@@ -436,13 +492,57 @@ mod tests {
                     ExportFormat::WebP(options) => {
                         filter_io::write_srgb8_webp(output, 17, 9, None, options, bands)
                     }
+                    ExportFormat::Tiff(options) => {
+                        filter_io::write_srgb_tiff(output, 17, 9, options, bands)
+                    }
                 }
             });
             assert!(result.is_err());
             assert!(cancel.load(Ordering::Relaxed));
             assert_eq!(std::fs::read(&path).unwrap(), b"original");
         }
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 3);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 4);
+    }
+
+    #[test]
+    fn tiff_stream_failures_and_conversion_cancellation_preserve_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("edited.tiff");
+        for bit_depth in [TiffBitDepth::Eight, TiffBitDepth::Sixteen] {
+            for failure in 0..4 {
+                std::fs::write(&path, b"original").unwrap();
+                let cancel = AtomicBool::new(false);
+                let result = publish_export(&path, &cancel, |file| {
+                    let bands = match failure {
+                        0 => vec![
+                            Ok(vec![[half::f16::ONE; 4]; 256 * 64]),
+                            Err(anyhow::anyhow!("producer failed")),
+                        ],
+                        1 => vec![Ok(vec![[half::f16::ONE; 4]; 17])],
+                        2 => vec![Ok(vec![[half::f16::ONE; 4]; 256 * 64 + 1])],
+                        _ => vec![Ok(vec![[half::f16::ONE; 4]; 256 * 64])],
+                    };
+                    let mut checks = 0;
+                    filter_io::write_srgb_tiff_cancellable(
+                        file,
+                        256,
+                        64,
+                        TiffOptions {
+                            bit_depth,
+                            ..Default::default()
+                        },
+                        bands,
+                        || {
+                            checks += 1;
+                            failure == 3 && checks >= 4
+                        },
+                    )
+                });
+                assert!(result.is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+            }
+        }
     }
 
     #[test]
@@ -645,6 +745,39 @@ mod tests {
             }
             assert!(reader.next_row().unwrap().is_none());
             reader.finish().unwrap();
+            for tile_edge in [17, 31] {
+                let tiff_path = directory.path().join("adjusted16.tiff");
+                completed.store(0, Ordering::Relaxed);
+                let plan = TilePlan::new(w, h, &device.limits(), tile_edge).unwrap();
+                let tile_count = plan.tile_count();
+                export_image(
+                    &device,
+                    &queue,
+                    &image,
+                    Some(&exif),
+                    &snapshot,
+                    &tiff_path,
+                    ExportFormat::Tiff(TiffOptions::default()),
+                    plan,
+                    &AtomicBool::new(false),
+                    &completed,
+                )
+                .unwrap();
+                assert_eq!(completed.load(Ordering::Relaxed), tile_count);
+                let reloaded = filter_io::decode(&tiff_path).unwrap();
+                assert!(reloaded.icc_profile.is_some());
+                assert!(reloaded.exif_bytes.is_none());
+                assert_eq!(
+                    reloaded.source_orientation,
+                    image::metadata::Orientation::NoTransforms
+                );
+                assert_eq!(
+                    image::open(&tiff_path).unwrap().into_rgba16(),
+                    image::open(directory.path().join("adjusted.png"))
+                        .unwrap()
+                        .into_rgba16()
+                );
+            }
             for seed in [None, Some(0)] {
                 let options = PngOptions {
                     bit_depth: PngBitDepth::Eight,
@@ -713,6 +846,27 @@ mod tests {
                         actual,
                         "lossless WebP must preserve the same quantized pixels as PNG8"
                     );
+                    let tiff_path = directory.path().join("adjusted8.tif");
+                    completed.store(0, Ordering::Relaxed);
+                    // TIFF deliberately omits EXIF, even when the captured bytes are malformed.
+                    export_image(
+                        &device,
+                        &queue,
+                        &image,
+                        Some(b"invalid EXIF"),
+                        &snapshot,
+                        &tiff_path,
+                        ExportFormat::Tiff(TiffOptions {
+                            bit_depth: TiffBitDepth::Eight,
+                            dither_seed: seed,
+                        }),
+                        TilePlan::new(w, h, &device.limits(), tile_edge).unwrap(),
+                        &AtomicBool::new(false),
+                        &completed,
+                    )
+                    .unwrap();
+                    assert_eq!(completed.load(Ordering::Relaxed), count);
+                    assert_eq!(image::open(&tiff_path).unwrap().into_rgba8(), actual);
                     for (original, actual) in image.pixels().iter().zip(actual.pixels()) {
                         let working = snapshot
                             .pixel(original.map(half::f16::to_f32))
@@ -1008,6 +1162,93 @@ mod tests {
                 u64::from(w) * u64::from(h),
                 webp_started.elapsed()
             );
+            for bit_depth in [TiffBitDepth::Eight, TiffBitDepth::Sixteen] {
+                let tiff_path = directory.path().join("large.tiff");
+                std::fs::write(&tiff_path, b"old destination").unwrap();
+                let tiff_started = Instant::now();
+                completed.store(0, Ordering::Relaxed);
+                export_image(
+                    &device,
+                    &queue,
+                    &source,
+                    None,
+                    &BasicAdjustments::exposure(1.0).unwrap(),
+                    &tiff_path,
+                    ExportFormat::Tiff(TiffOptions {
+                        bit_depth,
+                        ..Default::default()
+                    }),
+                    TilePlan::new(w, h, &device.limits(), 1024).unwrap(),
+                    &cancel,
+                    &completed,
+                )
+                .unwrap();
+                assert_eq!(completed.load(Ordering::Relaxed), total);
+                // Read one TIFF strip and PNG row at a time; never a full output image.
+                let mut decoder = tiff::decoder::Decoder::new(std::io::BufReader::new(
+                    std::fs::File::open(&tiff_path).unwrap(),
+                ))
+                .unwrap();
+                assert_eq!(decoder.dimensions().unwrap(), (w, h));
+                assert_eq!(
+                    decoder
+                        .get_tag_u16_vec(tiff::tags::Tag::ExtraSamples)
+                        .unwrap(),
+                    [2]
+                );
+                assert_eq!(
+                    decoder.get_tag_u32(tiff::tags::Tag::Orientation).unwrap(),
+                    1
+                );
+                assert!(
+                    !decoder
+                        .get_tag_u8_vec(tiff::tags::Tag::IccProfile)
+                        .unwrap()
+                        .is_empty()
+                );
+                let reference = match bit_depth {
+                    TiffBitDepth::Eight => &png8_path,
+                    TiffBitDepth::Sixteen => &path,
+                };
+                let mut reader = png::Decoder::new(std::io::BufReader::new(
+                    std::fs::File::open(reference).unwrap(),
+                ))
+                .read_info()
+                .unwrap();
+                let mut rows = 0;
+                for strip in 0..decoder.strip_count().unwrap() {
+                    match decoder.read_chunk(strip).unwrap() {
+                        tiff::decoder::DecodingResult::U8(samples) => {
+                            assert_eq!(bit_depth, TiffBitDepth::Eight);
+                            for row in samples.chunks_exact(w as usize * 4) {
+                                assert_eq!(row, reader.next_row().unwrap().unwrap().data());
+                                rows += 1;
+                            }
+                        }
+                        tiff::decoder::DecodingResult::U16(samples) => {
+                            assert_eq!(bit_depth, TiffBitDepth::Sixteen);
+                            for row in samples.chunks_exact(w as usize * 4) {
+                                let expected = reader.next_row().unwrap().unwrap();
+                                for (actual, expected) in
+                                    row.iter().zip(expected.data().as_chunks::<2>().0)
+                                {
+                                    assert_eq!(*actual, u16::from_be_bytes(*expected));
+                                }
+                                rows += 1;
+                            }
+                        }
+                        other => panic!("unexpected TIFF samples: {other:?}"),
+                    }
+                }
+                assert_eq!(rows, h);
+                assert!(reader.next_row().unwrap().is_none());
+                reader.finish().unwrap();
+                eprintln!(
+                    "Validated {} {bit_depth:?}-bit TIFF pixels across {total} tiles in {:.2?}",
+                    u64::from(w) * u64::from(h),
+                    tiff_started.elapsed()
+                );
+            }
             let jpeg_path = directory.path().join("large.jpg");
             completed.store(0, Ordering::Relaxed);
             let jpeg_started = Instant::now();

@@ -9,9 +9,10 @@ use std::path::Path;
 mod export;
 pub mod preset;
 pub use export::{
-    JpegOptions, PngBitDepth, PngOptions, WebPOptions, write_srgb_png, write_srgb_png_cancellable,
-    write_srgb8_jpeg, write_srgb8_jpeg_cancellable, write_srgb8_webp, write_srgb8_webp_cancellable,
-    write_srgb16_png, write_srgb16_png_with_exif,
+    JpegOptions, PngBitDepth, PngOptions, TiffBitDepth, TiffOptions, WebPOptions, write_srgb_png,
+    write_srgb_png_cancellable, write_srgb_tiff, write_srgb_tiff_cancellable, write_srgb8_jpeg,
+    write_srgb8_jpeg_cancellable, write_srgb8_webp, write_srgb8_webp_cancellable, write_srgb16_png,
+    write_srgb16_png_with_exif,
 };
 
 pub struct DecodedImage {
@@ -32,12 +33,24 @@ pub fn decode(path: &Path) -> Result<DecodedImage> {
         file.metadata()?.len() <= MAX_FILE_BYTES,
         "Input file exceeds the initial 512 MiB limit"
     );
-    // ImageReader also applies its default 512 MiB decoder allocation limit.
+    // Pixel decoding also uses ImageReader's default 512 MiB allocation limit.
     // This is a working-set estimate, not an OS-enforced RSS limit.
     let reader = ImageReader::new(std::io::BufReader::new(file)).with_guessed_format()?;
-    let mut decoder = reader
-        .into_decoder()
-        .context("Unsupported or invalid image")?;
+    // image's TIFF set_limits caps tag allocations at the pixel buffer size;
+    // on small images that silently hides larger ICC profiles. Read metadata
+    // with the TIFF decoder's initial limits, then apply pixel limits below.
+    let mut decoder: Box<dyn ImageDecoder> = if reader.format() == Some(image::ImageFormat::Tiff) {
+        Box::new(
+            image::codecs::tiff::TiffDecoder::new(reader.into_inner())
+                .context("Unsupported or invalid image")?,
+        )
+    } else {
+        Box::new(
+            reader
+                .into_decoder()
+                .context("Unsupported or invalid image")?,
+        )
+    };
     let (w, h) = decoder.dimensions();
     ensure!(
         w > 0 && h > 0 && u64::from(w) * u64::from(h) <= MAX_PIXELS,
@@ -58,6 +71,7 @@ pub fn decode(path: &Path) -> Result<DecodedImage> {
         "EXIF metadata exceeds the 16 MiB limit"
     );
     let source_orientation = decoder.orientation()?;
+    decoder.set_limits(image::Limits::default())?;
     let mut image = image::DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(source_orientation);
     let rgba = image.into_rgba32f();
@@ -134,6 +148,25 @@ fn convert_to_working(rgba: &[f32], source: &ColorProfile) -> Result<Vec<[f16; 4
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn small_tiff_retains_wide_gamut_icc_before_applying_pixel_limits() {
+        use image::ImageEncoder;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("p3.tiff");
+        let icc = ColorProfile::new_display_p3().encode().unwrap();
+        let mut encoder =
+            image::codecs::tiff::TiffEncoder::new(std::fs::File::create(&path).unwrap());
+        encoder.set_icc_profile(icc.clone()).unwrap();
+        encoder
+            .write_image(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let decoded = decode(&path).unwrap();
+        assert_eq!(decoded.icc_profile, Some(icc));
+        assert_eq!(decoded.source_orientation, Orientation::NoTransforms);
+        let p = decoded.buffer.pixels()[0].map(f16::to_f32);
+        let srgb = filter_core::color::rec2020_to_linear_srgb([p[0], p[1], p[2]]);
+        assert!(srgb[0] > 1.1 && srgb[1] < 0.0, "{srgb:?}");
+    }
     #[test]
     fn png_decode_applies_orientation_once_and_preserves_metadata() {
         use image::ImageEncoder;
