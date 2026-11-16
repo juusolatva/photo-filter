@@ -2,6 +2,7 @@ mod app;
 mod export;
 mod preset_ui;
 mod preview;
+mod resize;
 use std::sync::Arc;
 
 fn main() -> eframe::Result {

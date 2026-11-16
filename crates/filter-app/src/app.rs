@@ -1,6 +1,7 @@
 use crate::export::{ExportFormat, ExportJob, ExportResult};
 use crate::preset_ui::{Action as PresetAction, PresetUi};
 use crate::preview::PreviewCallback;
+use crate::resize::ExportResize;
 use eframe::egui;
 use filter_core::{
     ImageBuffer,
@@ -34,6 +35,7 @@ enum DialogResult {
         source: Arc<DecodedImage>,
         adjustments: BasicAdjustments,
         format: ExportFormat,
+        resize: ExportResize,
     },
 }
 
@@ -70,6 +72,7 @@ pub struct PhotoApp {
     png_options: filter_io::PngOptions,
     webp_options: filter_io::WebPOptions,
     tiff_options: filter_io::TiffOptions,
+    export_resize: ExportResize,
 }
 impl PhotoApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
@@ -126,6 +129,7 @@ impl PhotoApp {
             png_options: filter_io::PngOptions::default(),
             webp_options: filter_io::WebPOptions::default(),
             tiff_options: filter_io::TiffOptions::default(),
+            export_resize: ExportResize::default(),
         };
         if let Some(path) = path {
             app.open(path);
@@ -234,6 +238,7 @@ impl PhotoApp {
             ExportKind::WebP => ExportFormat::WebP(self.webp_options),
             ExportKind::Tiff => ExportFormat::Tiff(self.tiff_options),
         };
+        let resize = self.export_resize;
         self.dialog_open = true;
         let tx = self.dialog_tx.clone();
         let ctx = ctx.clone();
@@ -253,6 +258,7 @@ impl PhotoApp {
                 source,
                 adjustments,
                 format,
+                resize,
             });
             ctx.request_repaint();
         });
@@ -282,6 +288,7 @@ impl eframe::App for PhotoApp {
                     source,
                     adjustments,
                     format,
+                    resize,
                 } => {
                     match ExportJob::start(
                         rs.device.clone(),
@@ -290,6 +297,7 @@ impl eframe::App for PhotoApp {
                         adjustments,
                         path,
                         format,
+                        resize,
                         ctx.clone(),
                     ) {
                         Ok(job) => {
@@ -447,13 +455,13 @@ impl eframe::App for PhotoApp {
                         if ui.checkbox(&mut dither, "Dither 8-bit output").changed() {
                             self.jpeg_options.dither_seed = dither.then_some(0);
                         }
-                        ui.label("Full resolution · 8-bit sRGB · flattened alpha");
+                        ui.label("8-bit sRGB · flattened alpha");
                     } else if self.export_kind == ExportKind::WebP {
                         let mut dither = self.webp_options.dither_seed.is_some();
                         if ui.checkbox(&mut dither, "Dither 8-bit output").changed() {
                             self.webp_options.dither_seed = dither.then_some(0);
                         }
-                        ui.label("Full resolution · lossless 8-bit sRGB · preserves alpha");
+                        ui.label("Lossless 8-bit sRGB · preserves alpha");
                     } else if self.export_kind == ExportKind::Tiff {
                         ui.horizontal(|ui| {
                             ui.label("Bit depth");
@@ -474,7 +482,7 @@ impl eframe::App for PhotoApp {
                                 self.tiff_options.dither_seed = dither.then_some(0);
                             }
                         }
-                        ui.label("Full resolution · sRGB · preserves alpha");
+                        ui.label("sRGB · preserves alpha");
                         ui.label("Uncompressed · camera metadata omitted");
                     } else {
                         ui.horizontal(|ui| {
@@ -496,7 +504,49 @@ impl eframe::App for PhotoApp {
                                 self.png_options.dither_seed = dither.then_some(0);
                             }
                         }
-                        ui.label("Full resolution · sRGB · preserves alpha");
+                        ui.label("sRGB · preserves alpha");
+                    }
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Size");
+                        ui.selectable_value(&mut self.export_resize, ExportResize::Full, "Full");
+                        if ui
+                            .selectable_label(
+                                matches!(self.export_resize, ExportResize::LongEdge(_)),
+                                "Long edge",
+                            )
+                            .clicked()
+                            && !matches!(self.export_resize, ExportResize::LongEdge(_))
+                        {
+                            self.export_resize = ExportResize::LongEdge(2048);
+                        }
+                        if ui
+                            .selectable_label(
+                                matches!(self.export_resize, ExportResize::Percentage(_)),
+                                "Percentage",
+                            )
+                            .clicked()
+                            && !matches!(self.export_resize, ExportResize::Percentage(_))
+                        {
+                            self.export_resize = ExportResize::Percentage(50);
+                        }
+                    });
+                    match &mut self.export_resize {
+                        ExportResize::Full => {}
+                        ExportResize::LongEdge(edge) => {
+                            ui.add(egui::DragValue::new(edge).range(1..=u32::MAX).suffix(" px"));
+                            ui.label("Reduce only; smaller images retain their size.");
+                        }
+                        ExportResize::Percentage(percent) => {
+                            ui.add(egui::Slider::new(percent, 1..=100).suffix("%"));
+                        }
+                    }
+                    if let Some(source) = &self.source
+                        && let Ok((width, height)) = self
+                            .export_resize
+                            .dimensions(source.buffer.width(), source.buffer.height())
+                    {
+                        ui.label(format!("Output: {width} × {height} px"));
                     }
                     if ui
                         .add_enabled(

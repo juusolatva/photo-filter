@@ -1,3 +1,4 @@
+use crate::resize::{ExportResize, ResizeBands};
 use anyhow::{Context, Result, ensure};
 use filter_core::cpu_eval::BasicAdjustments;
 use filter_gpu::{TilePlan, TiledExposure};
@@ -96,9 +97,11 @@ impl ExportJob {
         adjustments: BasicAdjustments,
         path: PathBuf,
         format: ExportFormat,
+        resize: ExportResize,
         ctx: eframe::egui::Context,
     ) -> Result<Self> {
         format.validate_path(&path)?;
+        resize.dimensions(source.buffer.width(), source.buffer.height())?;
         let plan = TilePlan::new(
             source.buffer.width(),
             source.buffer.height(),
@@ -129,6 +132,7 @@ impl ExportJob {
                     plan,
                     &cancel,
                     &completed,
+                    resize,
                 );
                 let message = match result {
                     Ok(()) => {
@@ -181,7 +185,9 @@ fn export_image(
     plan: TilePlan,
     cancel: &AtomicBool,
     completed: &AtomicU64,
+    resize: ExportResize,
 ) -> Result<()> {
+    let dimensions = resize.dimensions(source.width(), source.height())?;
     let renderer = TiledExposure::new(device);
     let mut tiles = plan.tiles().peekable();
     let bands = std::iter::from_fn(|| {
@@ -227,6 +233,17 @@ fn export_image(
             Ok(band)
         })())
     });
+    let bands: Box<dyn Iterator<Item = Result<Vec<[half::f16; 4]>>>> =
+        if dimensions == (source.width(), source.height()) {
+            Box::new(bands)
+        } else {
+            Box::new(ResizeBands::new(
+                bands,
+                (source.width(), source.height()),
+                dimensions,
+                cancel,
+            )?)
+        };
     publish_export(path, cancel, |file| {
         // Buffer JPEG's small writes, checking cancellation throughout encoding too.
         let mut output = std::io::BufWriter::with_capacity(
@@ -239,8 +256,8 @@ fn export_image(
         match format {
             ExportFormat::Png(options) => filter_io::write_srgb_png_cancellable(
                 &mut output,
-                source.width(),
-                source.height(),
+                dimensions.0,
+                dimensions.1,
                 exif,
                 options,
                 bands,
@@ -248,8 +265,8 @@ fn export_image(
             )?,
             ExportFormat::Jpeg(options) => filter_io::write_srgb8_jpeg_cancellable(
                 &mut output,
-                source.width(),
-                source.height(),
+                dimensions.0,
+                dimensions.1,
                 exif,
                 options,
                 bands,
@@ -257,8 +274,8 @@ fn export_image(
             )?,
             ExportFormat::WebP(options) => filter_io::write_srgb8_webp_cancellable(
                 &mut output,
-                source.width(),
-                source.height(),
+                dimensions.0,
+                dimensions.1,
                 exif,
                 options,
                 bands,
@@ -266,8 +283,8 @@ fn export_image(
             )?,
             ExportFormat::Tiff(options) => filter_io::write_srgb_tiff_cancellable(
                 &mut output,
-                source.width(),
-                source.height(),
+                dimensions.0,
+                dimensions.1,
                 options,
                 bands,
                 || cancel.load(Ordering::Relaxed),
@@ -622,6 +639,72 @@ mod tests {
     }
 
     #[test]
+    fn resize_failures_and_cancellation_preserve_destinations_in_every_format() {
+        let directory = tempfile::tempdir().unwrap();
+        for format in [
+            ExportFormat::Png(PngOptions::default()),
+            ExportFormat::Png(PngOptions {
+                bit_depth: PngBitDepth::Eight,
+                ..Default::default()
+            }),
+            ExportFormat::Jpeg(JpegOptions::default()),
+            ExportFormat::WebP(WebPOptions::default()),
+            ExportFormat::Tiff(TiffOptions::default()),
+            ExportFormat::Tiff(TiffOptions {
+                bit_depth: TiffBitDepth::Eight,
+                ..Default::default()
+            }),
+        ] {
+            for failure in 0..7 {
+                let path = directory
+                    .path()
+                    .join(format!("resized.{}", format.extension()));
+                std::fs::write(&path, b"original").unwrap();
+                let cancel = AtomicBool::new(false);
+                let mut index = 0;
+                let bands = std::iter::from_fn(|| {
+                    index += 1;
+                    match index {
+                        1 if failure == 5 => Some(Ok(Vec::new())),
+                        1 => Some(Ok(vec![[half::f16::ONE; 4]; 8])),
+                        2 if failure == 0 => Some(Err(anyhow::anyhow!("render failed"))),
+                        2 if failure == 1 => None,
+                        2 if failure == 2 => {
+                            cancel.store(true, Ordering::Relaxed);
+                            Some(Ok(vec![[half::f16::ONE; 4]; 8]))
+                        }
+                        2 if failure == 4 => Some(Ok(Vec::new())),
+                        2 => Some(Ok(vec![[half::f16::ONE; 4]; 8])),
+                        3 if failure == 3 => Some(Err(anyhow::anyhow!("late render failure"))),
+                        3 if failure == 6 => Some(Ok(Vec::new())),
+                        _ => None,
+                    }
+                });
+                let result = publish_export(&path, &cancel, |file| {
+                    let bands = ResizeBands::new(bands, (4, 4), (2, 2), &cancel)?;
+                    match format {
+                        ExportFormat::Png(options) => {
+                            filter_io::write_srgb_png(file, 2, 2, None, options, bands)
+                        }
+                        ExportFormat::Jpeg(options) => {
+                            filter_io::write_srgb8_jpeg(file, 2, 2, None, options, bands)
+                        }
+                        ExportFormat::WebP(options) => {
+                            filter_io::write_srgb8_webp(file, 2, 2, None, options, bands)
+                        }
+                        ExportFormat::Tiff(options) => {
+                            filter_io::write_srgb_tiff(file, 2, 2, options, bands)
+                        }
+                    }
+                });
+                assert!(result.is_err(), "{format:?}, failure {failure}");
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+            }
+        }
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 4);
+    }
+
+    #[test]
     #[ignore = "requires a software GPU"]
     fn image_exports_render_the_captured_basic_adjustments() {
         pollster::block_on(async {
@@ -693,6 +776,7 @@ mod tests {
                 plan,
                 &AtomicBool::new(false),
                 &completed,
+                ExportResize::Full,
             )
             .unwrap();
             assert_eq!(completed.load(Ordering::Relaxed), count);
@@ -761,6 +845,7 @@ mod tests {
                     plan,
                     &AtomicBool::new(false),
                     &completed,
+                    ExportResize::Full,
                 )
                 .unwrap();
                 assert_eq!(completed.load(Ordering::Relaxed), tile_count);
@@ -800,6 +885,7 @@ mod tests {
                         plan,
                         &AtomicBool::new(false),
                         &completed,
+                        ExportResize::Full,
                     )
                     .unwrap();
                     assert_eq!(completed.load(Ordering::Relaxed), count);
@@ -828,6 +914,7 @@ mod tests {
                         TilePlan::new(w, h, &device.limits(), tile_edge).unwrap(),
                         &AtomicBool::new(false),
                         &completed,
+                        ExportResize::Full,
                     )
                     .unwrap();
                     assert_eq!(completed.load(Ordering::Relaxed), count);
@@ -863,6 +950,7 @@ mod tests {
                         TilePlan::new(w, h, &device.limits(), tile_edge).unwrap(),
                         &AtomicBool::new(false),
                         &completed,
+                        ExportResize::Full,
                     )
                     .unwrap();
                     assert_eq!(completed.load(Ordering::Relaxed), count);
@@ -909,6 +997,7 @@ mod tests {
                 TilePlan::new(w, h, &device.limits(), 17).unwrap(),
                 &AtomicBool::new(false),
                 &completed,
+                ExportResize::Full,
             )
             .unwrap();
             assert_eq!(completed.load(Ordering::Relaxed), count);
@@ -952,6 +1041,185 @@ mod tests {
                         (i16::from(actual[c]) - i16::from(expected[c])).abs() <= 4,
                         "{actual:?} vs {expected:?}"
                     );
+                }
+            }
+            // Resize after the captured nonlinear adjustments, across formats and tile boundaries.
+            let adjusted_source = filter_core::ImageBuffer::new(
+                w,
+                h,
+                image
+                    .pixels()
+                    .iter()
+                    .map(|p| {
+                        snapshot
+                            .pixel(p.map(half::f16::to_f32))
+                            .map(half::f16::from_f32)
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let formats = [
+                ExportFormat::Png(PngOptions::default()),
+                ExportFormat::Png(PngOptions {
+                    bit_depth: PngBitDepth::Eight,
+                    dither_seed: Some(42),
+                }),
+                ExportFormat::WebP(WebPOptions {
+                    dither_seed: Some(42),
+                }),
+                ExportFormat::Tiff(TiffOptions::default()),
+                ExportFormat::Tiff(TiffOptions {
+                    bit_depth: TiffBitDepth::Eight,
+                    dither_seed: Some(42),
+                }),
+                ExportFormat::Jpeg(options),
+            ];
+            let mut full_outputs = Vec::new();
+            for resize in [
+                ExportResize::Full,
+                ExportResize::Percentage(100),
+                ExportResize::LongEdge(1000),
+                ExportResize::Percentage(50),
+                ExportResize::LongEdge(20),
+                ExportResize::Percentage(1),
+            ] {
+                let (ow, oh) = resize.dimensions(w, h).unwrap();
+                let expected = adjusted_source.proxy(ow.max(oh));
+                assert_eq!((expected.width(), expected.height()), (ow, oh));
+                for (index, format) in formats.into_iter().enumerate() {
+                    let mut previous = None;
+                    for edge in [7, 17, 31] {
+                        let path = directory
+                            .path()
+                            .join(format!("resized.{}", format.extension()));
+                        let plan = TilePlan::new(w, h, &device.limits(), edge).unwrap();
+                        let tile_count = plan.tile_count();
+                        completed.store(0, Ordering::Relaxed);
+                        export_image(
+                            &device,
+                            &queue,
+                            &image,
+                            Some(&exif),
+                            &snapshot,
+                            &path,
+                            format,
+                            plan,
+                            &AtomicBool::new(false),
+                            &completed,
+                            resize,
+                        )
+                        .unwrap();
+                        assert_eq!(completed.load(Ordering::Relaxed), tile_count);
+                        let pixels = image::open(&path).unwrap().into_rgba16();
+                        if let Some(previous) = previous {
+                            assert_eq!(pixels, previous, "tile seams changed resized output");
+                        }
+                        previous = Some(pixels.clone());
+                        if edge == 7 && resize == ExportResize::Full {
+                            full_outputs.push(pixels.clone());
+                        }
+                        if matches!(
+                            resize,
+                            ExportResize::Percentage(100) | ExportResize::LongEdge(1000)
+                        ) {
+                            assert_eq!(
+                                pixels, full_outputs[index],
+                                "identity size must bypass filtering"
+                            );
+                        }
+                        let actual = image::open(&path).unwrap();
+                        assert_eq!((actual.width(), actual.height()), (ow, oh));
+                        let reloaded = filter_io::decode(&path).unwrap();
+                        assert!(reloaded.icc_profile.is_some());
+                        assert_eq!(
+                            reloaded.source_orientation,
+                            image::metadata::Orientation::NoTransforms
+                        );
+                        if !matches!(format, ExportFormat::Tiff(_)) {
+                            assert_eq!(
+                                reloaded.exif_bytes.as_deref(),
+                                Some(expected_exif.as_slice())
+                            );
+                        }
+                        let expected_path = directory
+                            .path()
+                            .join(format!("expected.{}", format.extension()));
+                        let output = std::fs::File::create(&expected_path).unwrap();
+                        let bands = [Ok(expected.pixels().to_vec())];
+                        match format {
+                            ExportFormat::Png(options) => filter_io::write_srgb_png(
+                                output,
+                                ow,
+                                oh,
+                                Some(&exif),
+                                options,
+                                bands,
+                            ),
+                            ExportFormat::Jpeg(options) => filter_io::write_srgb8_jpeg(
+                                output,
+                                ow,
+                                oh,
+                                Some(&exif),
+                                options,
+                                bands,
+                            ),
+                            ExportFormat::WebP(options) => filter_io::write_srgb8_webp(
+                                output,
+                                ow,
+                                oh,
+                                Some(&exif),
+                                options,
+                                bands,
+                            ),
+                            ExportFormat::Tiff(options) => {
+                                filter_io::write_srgb_tiff(output, ow, oh, options, bands)
+                            }
+                        }
+                        .unwrap();
+                        let expected_output = image::open(&expected_path).unwrap();
+                        let sixteen = matches!(
+                            format,
+                            ExportFormat::Png(PngOptions {
+                                bit_depth: PngBitDepth::Sixteen,
+                                ..
+                            }) | ExportFormat::Tiff(TiffOptions {
+                                bit_depth: TiffBitDepth::Sixteen,
+                                ..
+                            })
+                        );
+                        if sixteen {
+                            for (a, e) in actual
+                                .into_rgba16()
+                                .pixels()
+                                .zip(expected_output.into_rgba16().pixels())
+                            {
+                                for c in 0..4 {
+                                    assert!(
+                                        (i32::from(a[c]) - i32::from(e[c])).abs() <= 128,
+                                        "{resize:?} {format:?}: {a:?} vs {e:?}"
+                                    );
+                                }
+                            }
+                        } else {
+                            let tolerance = if matches!(format, ExportFormat::Jpeg(_)) {
+                                4
+                            } else {
+                                2
+                            };
+                            for (a, e) in actual
+                                .into_rgba8()
+                                .pixels()
+                                .zip(expected_output.into_rgba8().pixels())
+                            {
+                                for c in 0..4 {
+                                    assert!(
+                                        (i16::from(a[c]) - i16::from(e[c])).abs() <= tolerance,
+                                        "{resize:?} {format:?}: {a:?} vs {e:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -1020,6 +1288,7 @@ mod tests {
                 plan,
                 &cancel,
                 &completed,
+                ExportResize::Full,
             )
             .unwrap();
             assert_eq!(completed.load(Ordering::Relaxed), total);
@@ -1077,6 +1346,7 @@ mod tests {
                 TilePlan::new(w, h, &device.limits(), 1024).unwrap(),
                 &cancel,
                 &completed,
+                ExportResize::Full,
             )
             .unwrap();
             assert_eq!(completed.load(Ordering::Relaxed), total);
@@ -1131,6 +1401,7 @@ mod tests {
                 TilePlan::new(w, h, &device.limits(), 1024).unwrap(),
                 &cancel,
                 &completed,
+                ExportResize::Full,
             )
             .unwrap();
             assert_eq!(completed.load(Ordering::Relaxed), total);
@@ -1181,6 +1452,7 @@ mod tests {
                     TilePlan::new(w, h, &device.limits(), 1024).unwrap(),
                     &cancel,
                     &completed,
+                    ExportResize::Full,
                 )
                 .unwrap();
                 assert_eq!(completed.load(Ordering::Relaxed), total);
@@ -1267,6 +1539,7 @@ mod tests {
                 TilePlan::new(w, h, &device.limits(), 1024).unwrap(),
                 &cancel,
                 &completed,
+                ExportResize::Full,
             )
             .unwrap();
             assert_eq!(completed.load(Ordering::Relaxed), total);
@@ -1298,6 +1571,57 @@ mod tests {
                 "Validated {} JPEG pixels across {total} tiles in {:.2?}",
                 u64::from(w) * u64::from(h),
                 jpeg_started.elapsed()
+            );
+            // Heavy reduction still renders every source tile with bounded row state.
+            drop(rgb);
+            let resize_started = Instant::now();
+            let resized_path = directory.path().join("large-resized.png");
+            completed.store(0, Ordering::Relaxed);
+            export_image(
+                &device,
+                &queue,
+                &source,
+                None,
+                &BasicAdjustments::exposure(1.0).unwrap(),
+                &resized_path,
+                ExportFormat::Png(PngOptions::default()),
+                TilePlan::new(w, h, &device.limits(), 1024).unwrap(),
+                &cancel,
+                &completed,
+                ExportResize::LongEdge(257),
+            )
+            .unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), total);
+            let expected = source.proxy(257);
+            let adjusted: Vec<_> = expected
+                .pixels()
+                .iter()
+                .map(|p| {
+                    [
+                        half::f16::from_f32(p[0].to_f32() * 2.0),
+                        half::f16::from_f32(p[1].to_f32() * 2.0),
+                        half::f16::from_f32(p[2].to_f32() * 2.0),
+                        p[3],
+                    ]
+                })
+                .collect();
+            let mut encoded = Vec::new();
+            filter_io::write_srgb16_png(
+                &mut encoded,
+                expected.width(),
+                expected.height(),
+                [Ok(adjusted)],
+            )
+            .unwrap();
+            assert_eq!(
+                image::open(&resized_path).unwrap().into_rgba16(),
+                image::load_from_memory(&encoded).unwrap().into_rgba16()
+            );
+            eprintln!(
+                "Validated 36.6MP reduction to {} × {} across {total} tiles in {:.2?}",
+                expected.width(),
+                expected.height(),
+                resize_started.elapsed()
             );
             eprintln!(
                 "Validated {} pixels across {total} tiles in {:.2?}",
