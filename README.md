@@ -24,6 +24,8 @@ Below 100%, the area-filtered proxy stays visible to avoid aliasing from minifyi
 single-level source tiles; filtered region rendering at intermediate scales remains pending.
 Viewport bilinear interpolation uses explicit float math to avoid adapter-dependent
 sampler weight precision near high-contrast tile boundaries.
+All tiles derive sampling coordinates from the same physical viewport bounds,
+including its window offset, rather than interpolating UVs over individual quads.
 Tile uniform buffers and bind groups are reused across repaints, with parameter updates
 batched through reusable staging memory. A failed tile leaves its area on the proxy while
 other tiles continue refining. **Retry preview** frees the cache and retries failed tiles
@@ -97,6 +99,8 @@ ICD; Windows selects DX12 and requests the built-in WARP fallback. Test logs pri
 adapter details. Tests honor `WGPU_BACKEND` and continue to reject GL. Dependency
 caches are saved only from `main`, and newer runs cancel superseded runs on the same ref.
 These headless checks do not exercise native window interaction or file dialogs.
+Software-GPU viewport tests run before the separate large-image regression so
+rendering failures surface without waiting for the 36.6MP exports.
 
 GPU tests check both sRGB viewport paths and alpha compositing, CPU/GPU parity across all basic controls, tiled-vs-untiled output, straight alpha, HDR/negative working values, and unaligned edge tiles. An additional app test checks PNG, JPEG, WebP and TIFF output against a captured basic-adjustment snapshot. The large export test processes a 6101 × 6001 image (36,612,101 pixels) with a granted 2048px texture limit and 256 MiB buffer limit, then checks every decoded 8/16-bit PNG/TIFF, lossless WebP and JPEG pixel (with a lossy tolerance for JPEG), plus a 257 × 253 streamed reduction. Both source dimensions exceed the texture limit, and a full-image readback would exceed the buffer limit. Ordinary workspace tests cover tile planning, output depth/profile/alpha, EXIF preservation and export/reload across all eight orientations for PNG/JPEG/WebP sources in both byte orders, PNG/TIFF bit depth, PNG/WebP/TIFF straight alpha and seeded dithering, JPEG quality and linear-light flattening, area-resize dimensions/color/alpha/band invariance, stream errors, and failure-safe file publication/cancellation. The app/export path polls without blocking. GPU parity and viewport test harnesses use bounded blocking polls for deterministic readback.
 

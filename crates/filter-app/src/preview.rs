@@ -7,8 +7,37 @@ use std::sync::{Arc, mpsc};
 pub struct PreviewCallback {
     pub renderer: Arc<ExposureRenderer>,
     pub frames: Vec<ExposureFrame>,
+    pub viewport: egui::Rect,
 }
 impl egui_wgpu::CallbackTrait for PreviewCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        _resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let bounds = egui::PaintCallbackInfo {
+            viewport: self.viewport,
+            clip_rect: self.viewport,
+            pixels_per_point: screen.pixels_per_point,
+            screen_size_px: screen.size_in_pixels,
+        }
+        .viewport_in_pixels();
+        if bounds.width_px > 0 && bounds.height_px > 0 {
+            self.renderer.set_viewport(
+                queue,
+                [
+                    bounds.left_px as f32,
+                    bounds.top_px as f32,
+                    bounds.width_px as f32,
+                    bounds.height_px as f32,
+                ],
+            );
+        }
+        Vec::new()
+    }
     fn paint(
         &self,
         _info: eframe::egui::PaintCallbackInfo,
@@ -437,13 +466,23 @@ mod tests {
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         size: (u32, u32),
+        origin: (u32, u32),
         frames: &[ExposureFrame],
     ) -> Vec<u8> {
+        renderer.set_viewport(
+            queue,
+            [
+                origin.0 as f32,
+                origin.1 as f32,
+                size.0 as f32,
+                size.1 as f32,
+            ],
+        );
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("region test target"),
             size: wgpu::Extent3d {
-                width: size.0,
-                height: size.1,
+                width: size.0 + origin.0,
+                height: size.1 + origin.1,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -453,10 +492,10 @@ mod tests {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let stride = (size.0 * 4).div_ceil(256) * 256;
+        let stride = ((size.0 + origin.0) * 4).div_ceil(256) * 256;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: u64::from(stride) * u64::from(size.1),
+            size: u64::from(stride) * u64::from(size.1 + origin.1),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -475,6 +514,14 @@ mod tests {
                 })],
                 ..Default::default()
             });
+            pass.set_viewport(
+                origin.0 as f32,
+                origin.1 as f32,
+                size.0 as f32,
+                size.1 as f32,
+                0.0,
+                1.0,
+            );
             for frame in frames {
                 renderer.paint(&mut pass, frame);
             }
@@ -486,7 +533,7 @@ mod tests {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(stride),
-                    rows_per_image: Some(size.1),
+                    rows_per_image: Some(size.1 + origin.1),
                 },
             },
             texture.size(),
@@ -508,7 +555,13 @@ mod tests {
         let mapped = buffer.slice(..).get_mapped_range().unwrap();
         let result = mapped
             .chunks_exact(stride as usize)
-            .flat_map(|r| r[..size.0 as usize * 4].iter().copied())
+            .skip(origin.1 as usize)
+            .take(size.1 as usize)
+            .flat_map(|r| {
+                r[origin.0 as usize * 4..(origin.0 + size.0) as usize * 4]
+                    .iter()
+                    .copied()
+            })
             .collect();
         drop(mapped);
         buffer.unmap();
@@ -697,6 +750,7 @@ mod tests {
                             &queue,
                             format,
                             size,
+                            (7, 9),
                             &[renderer.frame_region_adjusted(
                                 &device,
                                 &texture,
@@ -709,7 +763,8 @@ mod tests {
                                 ],
                             )],
                         );
-                        let actual = render(&renderer, &device, &queue, format, size, &frames);
+                        let actual =
+                            render(&renderer, &device, &queue, format, size, (7, 9), &frames);
                         for (i, (a, b)) in actual.iter().zip(&expected).enumerate() {
                             assert!(
                                 (i32::from(*a) - i32::from(*b)).abs() <= 1,
@@ -730,7 +785,7 @@ mod tests {
                                 let rgb = filter_core::color::rec2020_to_linear_srgb(
                                     pixel[..3].try_into().unwrap(),
                                 );
-                                let checker = if (i % 67 / 12 + i / 67 / 12) % 2 == 0 {
+                                let checker = if ((i % 67 + 7) / 12 + (i / 67 + 9) / 12) % 2 == 0 {
                                     0.28
                                 } else {
                                     0.18
@@ -827,13 +882,22 @@ mod tests {
                         visible.height() / 257.0,
                     ],
                 );
-                let expected = render(&renderer, &device, &queue, format, (63, 61), &[reference]);
+                let expected = render(
+                    &renderer,
+                    &device,
+                    &queue,
+                    format,
+                    (63, 61),
+                    (0, 0),
+                    &[reference],
+                );
                 let actual = render(
                     &limited_renderer,
                     &limited_device,
                     &limited_queue,
                     format,
                     (63, 61),
+                    (0, 0),
                     &frames,
                 );
                 assert!(

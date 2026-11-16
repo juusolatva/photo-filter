@@ -709,6 +709,7 @@ impl eframe::App for PhotoApp {
                     let callback = PreviewCallback {
                         renderer: self.renderer.clone(),
                         frames,
+                        viewport: visible,
                     };
                     ui.painter()
                         .with_clip_rect(rect)

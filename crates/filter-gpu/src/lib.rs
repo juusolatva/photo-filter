@@ -18,6 +18,7 @@ pub struct ExposureRenderer {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     target_is_srgb: bool,
+    viewport: wgpu::Buffer,
 }
 pub struct SourceTexture {
     view: wgpu::TextureView,
@@ -88,6 +89,16 @@ impl ExposureRenderer {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
@@ -130,11 +141,23 @@ impl ExposureRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let viewport = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("viewport physical bounds"),
+            contents: bytemuck::cast_slice(&[0.0_f32, 0.0, 1.0, 1.0]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         Self {
             pipeline,
             layout,
             target_is_srgb: format.is_srgb(),
+            viewport,
         }
+    }
+    /// Set physical viewport origin/size before painting. All frames from this
+    /// renderer share these bounds; use one renderer per simultaneous viewport.
+    pub fn set_viewport(&self, queue: &wgpu::Queue, bounds: [f32; 4]) {
+        assert!(bounds.iter().all(|v| v.is_finite()) && bounds[2] > 0.0 && bounds[3] > 0.0);
+        queue.write_buffer(&self.viewport, 0, bytemuck::cast_slice(&bounds));
     }
     pub fn upload(
         &self,
@@ -286,6 +309,10 @@ impl ExposureRenderer {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&source.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.viewport.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
