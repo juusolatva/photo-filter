@@ -55,7 +55,7 @@ Its uncompressed pixel payload is capped at 512 MiB, excluding headers/profile/s
 the current import pixel budget keeps app exports below that bound. TIFF metadata is read
 before applying pixel decoding limits so small tagged images retain their ICC profiles.
 
-A Rust toolchain supporting edition 2024 is required. The lockfile pins compatible eframe/egui-wgpu 0.37 and wgpu 30. Linux needs a Vulkan driver and the X11 or Wayland runtime libraries. Native file dialogs use `xdg-desktop-portal` and an installed portal backend; command-line paths and drop remain available without it. `--software-gpu` requires Mesa lavapipe on Linux or a WARP adapter on Windows. `WGPU_BACKEND` can restrict selection to `vulkan`, `dx12` or `metal`; GL is rejected.
+Rust 1.95 or newer is required by the locked GUI dependencies; the workspace uses edition 2024. The lockfile pins compatible eframe/egui-wgpu 0.37 and wgpu 30. Linux needs a Vulkan driver and the X11 or Wayland runtime libraries. Native file dialogs use `xdg-desktop-portal` and an installed portal backend; command-line paths and drop remain available without it. `--software-gpu` requires Mesa lavapipe on Linux or a WARP adapter on Windows. `WGPU_BACKEND` can restrict selection to `vulkan`, `dx12` or `metal`; GL is rejected.
 
 ```sh
 cargo fmt --all --check
@@ -69,6 +69,16 @@ cargo test -p filter-app --locked image_exports_render -- --ignored
 # Debug builds can take several minutes:
 cargo test -p filter-app --locked large_image_exports -- --ignored --nocapture
 ```
+
+[The CI workflow](.github/workflows/ci.yml) runs on pull requests, pushes to `main`,
+and manual dispatch. Its Ubuntu 24.04 and Windows 2025 jobs install stable Rust,
+check formatting and Clippy, and run the locked workspace tests. Both jobs explicitly
+run all ignored software-GPU tests serially, including the 36.6MP export regression;
+a missing adapter fails the job. Ubuntu installs Mesa lavapipe and selects its Vulkan
+ICD; Windows selects DX12 and requests the built-in WARP fallback. Test logs print
+adapter details. Tests honor `WGPU_BACKEND` and continue to reject GL. Dependency
+caches are saved only from `main`, and newer runs cancel superseded runs on the same ref.
+These headless checks do not exercise native window interaction or file dialogs.
 
 GPU tests check both sRGB viewport paths and alpha compositing, CPU/GPU parity across all basic controls, tiled-vs-untiled output, straight alpha, HDR/negative working values, and unaligned edge tiles. An additional app test checks PNG, JPEG, WebP and TIFF output against a captured basic-adjustment snapshot. The large export test processes a 6101 × 6001 image (36,612,101 pixels) with a granted 2048px texture limit and 256 MiB buffer limit, then checks every decoded 8/16-bit PNG/TIFF, lossless WebP and JPEG pixel (with a lossy tolerance for JPEG), plus a 257 × 253 streamed reduction. Both source dimensions exceed the texture limit, and a full-image readback would exceed the buffer limit. Ordinary workspace tests cover tile planning, output depth/profile/alpha, EXIF preservation and export/reload across all eight orientations for PNG/JPEG/WebP sources in both byte orders, PNG/TIFF bit depth, PNG/WebP/TIFF straight alpha and seeded dithering, JPEG quality and linear-light flattening, area-resize dimensions/color/alpha/band invariance, stream errors, and failure-safe file publication/cancellation. The app/export path polls without blocking. GPU parity and viewport test harnesses use bounded blocking polls for deterministic readback.
 

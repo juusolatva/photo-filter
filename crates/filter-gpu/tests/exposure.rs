@@ -8,7 +8,8 @@ use half::f16;
 fn preview_basic_adjustments_encode_and_composite_alpha() {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY)
+                & wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = instance
@@ -18,6 +19,7 @@ fn preview_basic_adjustments_encode_and_composite_alpha() {
             })
             .await
             .expect("software adapter required");
+        eprintln!("Software GPU: {:?}", adapter.get_info());
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         for format in [
             wgpu::TextureFormat::Rgba8Unorm,

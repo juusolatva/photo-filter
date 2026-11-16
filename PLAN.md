@@ -365,6 +365,8 @@ Implementation status (2026-11-16): initial edit/preset model implemented in `fi
 * **Done Criteria:** Can create complex multi-stage custom filters, save portable full or partial presets, browse with live thumbnails, and export `.cube` LUTs.
 
 ### Phase 5: Polish, `filter-cli`, & Cross-Platform Packaging
+
+Implementation status (2026-11-16): `.github/workflows/ci.yml` now defines Ubuntu 24.04/lavapipe (Vulkan) and Windows 2025/WARP (DX12) jobs for stable-Rust formatting, strict Clippy, locked workspace tests and every ignored software-GPU test, including the 36.6MP export/resizing regression. Software-GPU tests honor backend selection and log their adapters; absent adapters fail rather than skip. GPU tests run serially to bound memory/device pressure. Read-only permissions, immutable action pins, main-only cache saves, timeouts and cancellation of superseded runs are configured. Release packaging, CLI work and native desktop checks remain pending.
 * **Deliverables:**
   * Add `filter-cli` for batch applying `.pfpreset.json` files to folders of images from the terminal (headless `wgpu`, software adapter when no GPU).
   * Keyboard shortcuts, `eframe` window/settings persistence, optional `.pfedit.json` sidecars, better error toasts, VRAM caps tuning, and optional lossy WebP feature (`webp`).

@@ -709,7 +709,8 @@ mod tests {
     fn image_exports_render_the_captured_basic_adjustments() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::PRIMARY,
+                backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY)
+                    & wgpu::Backends::PRIMARY,
                 ..wgpu::InstanceDescriptor::new_without_display_handle()
             });
             let adapter = instance
@@ -719,6 +720,7 @@ mod tests {
                 })
                 .await
                 .expect("software adapter required");
+            eprintln!("Software GPU: {:?}", adapter.get_info());
             let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
             let (w, h) = (53, 11);
             let image = filter_core::ImageBuffer::new(
@@ -1230,7 +1232,8 @@ mod tests {
     fn large_image_exports_exceed_texture_and_full_readback_limits() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::PRIMARY,
+                backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY)
+                    & wgpu::Backends::PRIMARY,
                 ..wgpu::InstanceDescriptor::new_without_display_handle()
             });
             let adapter = instance
@@ -1240,6 +1243,7 @@ mod tests {
                 })
                 .await
                 .expect("software adapter required");
+            eprintln!("Software GPU: {:?}", adapter.get_info());
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     required_limits: wgpu::Limits {
