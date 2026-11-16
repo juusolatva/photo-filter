@@ -1,7 +1,7 @@
 //! CPU reference for the basic pointwise WGSL stages, in straight linear Rec.2020.
 //! Spatial filters, curves, grading, and custom-stack execution are separate work.
 use crate::{
-    color::*,
+    color::{oklab_to_rec2020, rec2020_to_oklab, relative_white_balance, transform},
     edit::{Calibration, EditState, ModelError, Tone},
 };
 use rayon::prelude::*;
