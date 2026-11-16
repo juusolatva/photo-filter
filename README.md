@@ -19,7 +19,7 @@ within a 128 MiB texture-payload budget (excluding driver overhead and in-flight
 Very large visible source regions refine a central subset and retain the proxy elsewhere.
 Tiles survive panning and adjustment changes; each draw uses the current basic settings,
 and results from a previous image are discarded. No full-image GPU texture or region
-readback is required. Spatial filtering, GPU histogram and cursor probe remain pending.
+readback is required. Spatial filtering and cursor probe remain pending.
 Below 100%, the area-filtered proxy stays visible to avoid aliasing from minifying
 single-level source tiles; filtered region rendering at intermediate scales remains pending.
 Viewport bilinear interpolation uses explicit float math to avoid adapter-dependent
@@ -30,6 +30,16 @@ Tile uniform buffers and bind groups are reused across repaints, with parameter 
 batched through reusable staging memory. A failed tile leaves its area on the proxy while
 other tiles continue refining. **Retry preview** frees the cache and retries failed tiles
 without reopening the image. An unavailable worker is reported separately.
+
+The adjustment panel shows a live 256-bin **RGB/luminance histogram** of the whole
+edited preview, independent of pan or zoom. Hover it for channel clipping counts,
+sample counts and transparency details. Fully transparent pixels are excluded;
+partial alpha counts once, before checkerboard compositing or export flattening.
+RGB clipping counts preview pixels with any sRGB channel at black or white, including
+exact endpoints. Counts describe the proxy rather than full-resolution export pixels.
+Older curves are dimmed and marked **Updating…** while the current edit is measured;
+results from superseded edits/images cannot replace current data. Failed readback
+offers **Retry histogram**. See [the histogram contract](docs/histogram.md).
 
 Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
 
@@ -112,6 +122,13 @@ failures, retry, channel backpressure and worker disconnection. Ordinary tests c
 100% refinement threshold, fractional tile coverage, memory bounds
 and physical-pixel alignment at several display scales. Native Linux/Windows interaction
 and refinement latency still require desktop validation.
+
+Histogram GPU tests compare the CPU reference against neutral, exposure, mixed
+adjustments, HDR/negative values, partial/zero alpha and invalid samples. They check
+independent double-buffered jobs, saturation of both slots, recycled counter clearing,
+source replacement and device/source limits. The app's headless UI test checks edit
+coalescing, idle behavior and reserved-panel rendering; ordinary tests reject stale
+image/edit results and cover retry, bins, luminance and clipping semantics.
 
 Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Rendering of curves, detail, grading and custom nodes remains pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
 

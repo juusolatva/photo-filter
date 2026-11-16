@@ -1,5 +1,6 @@
 mod app;
 mod export;
+mod histogram_ui;
 mod preset_ui;
 mod preview;
 mod resize;
