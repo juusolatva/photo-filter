@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
     types: [opened, synchronize, reopened]
+  merge_group:
+    branches: [main]
+    types: [checks_requested]
   schedule:
     # Daily: catches advisories published against an unchanged Cargo.lock.
     - cron: "17 5 * * *"
