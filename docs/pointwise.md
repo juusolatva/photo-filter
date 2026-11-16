@@ -2,7 +2,9 @@
 
 The desktop app renders Exposure, relative Temperature/Tint, Brightness, Contrast,
 Highlights/Shadows, Whites/Blacks, Vibrance and Saturation. The controls leave the
-source untouched and feed both the proxy viewport and full-resolution PNG/JPEG/WebP/TIFF export.
+source untouched and feed both the proxy viewport and PNG/JPEG/WebP/TIFF export.
+Export can retain full size or reduce by long edge/percentage; area filtering runs
+after the captured pointwise adjustments and before output conversion.
 The export captures the source and adjustments when its save dialog opens.
 Snapshots are rebuilt only when edits change. Unsupported or invalid edits show
 a diagnostic and disable export without panicking or showing a stale preview.

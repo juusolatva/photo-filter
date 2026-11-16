@@ -13,8 +13,10 @@ Use **Open image**, **Ctrl+O**, or drag a file onto the window. Drag to pan, scr
 
 Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
 
-Choose **PNG**, **JPEG**, **WebP**, or **TIFF** under **Format**, then **Export…** to save the full-resolution
-image with a snapshot of the current adjustments and export settings. PNG offers 8-bit or
+Choose **PNG**, **JPEG**, **WebP**, or **TIFF** under **Format**, choose **Full**, **Long edge**, or **Percentage** under **Size**, then **Export…**.
+Full resolution is the default. Long-edge pixels and integer percentages (1–100%)
+reduce only, preserve aspect ratio to the nearest pixel, and show the output dimensions.
+The save dialog captures the source, adjustments and export settings. PNG offers 8-bit or
 16-bit sRGB with straight alpha (`.png`, default 16-bit). Eight-bit PNG includes optional
 seeded RGB dithering; alpha uses nearest rounding without noise. JPEG produces 8-bit
 sRGB (`.jpg`/`.jpeg`), with quality 1–100 (default 90), a selectable background (default white) for linear-light alpha
@@ -38,6 +40,13 @@ frame compression waits for that pass to finish before discarding the result.
 New exports use normal creation
 permissions; replacements preserve existing Unix permission bits.
 
+Resizing averages rendered pixels in linear light with alpha weighting, after the
+basic adjustments and before color conversion/quantization. Transparent hidden color
+does not darken edges; footprints containing only transparent samples produce zero RGB. Full-size
+exports preserve hidden RGB as before. Reduction streams row bands with at most 64 MiB
+of additional resize rows; there is no full resized working-image allocation. Every
+source tile is still rendered. Enlargement and output sharpening remain pending.
+
 Export shares the viewer's GPU device and submits one tile at a time, with asynchronous readback and non-blocking polling on a dedicated worker. It never allocates a full-image GPU texture or readback buffer. Tiles fit granted texture/buffer/dispatch limits, and padded 256-byte staging rows are stripped on readback. PNG encoding streams row bands, targeting 32 MiB per band (or one scanline for exceptionally wide images), plus tile buffers and the immutable half-float source. JPEG uses an additional RGB8 CPU buffer (3 bytes/pixel, capped at 512 MiB) for its explicit encoder. WebP uses an additional RGBA8 CPU buffer (4 bytes/pixel, capped at 512 MiB), plus encoder-owned transformed pixels and compressed frame data; the cap does not bound total process memory. WebP dimensions must each be 1–16384 pixels. Use a release build for large photos.
 
 TIFF streams the same GPU row bands into strips targeting 1 MiB (or one wider scanline),
@@ -54,14 +63,14 @@ cargo check --workspace --locked
 cargo test --workspace --locked
 # Explicit integration test; fails if a software adapter is unavailable:
 cargo test -p filter-gpu --tests --locked -- --ignored
-# Basic-control PNG/JPEG/WebP/TIFF export test; requires a software adapter:
+# Basic-control and resizing tests for all export formats; needs a software adapter:
 cargo test -p filter-app --locked image_exports_render -- --ignored
 # >36MP export regression; requires roughly 800 MiB RAM.
 # Debug builds can take several minutes:
 cargo test -p filter-app --locked large_image_exports -- --ignored --nocapture
 ```
 
-GPU tests check both sRGB viewport paths and alpha compositing, CPU/GPU parity across all basic controls, tiled-vs-untiled output, straight alpha, HDR/negative working values, and unaligned edge tiles. An additional app test checks PNG, JPEG, WebP and TIFF output against a captured basic-adjustment snapshot. The large export test processes a 6101 × 6001 image (36,612,101 pixels) with a granted 2048px texture limit and 256 MiB buffer limit, then checks every decoded 8/16-bit PNG/TIFF, lossless WebP and JPEG pixel (with a lossy tolerance for JPEG). Both dimensions exceed the texture limit, and a full-image readback would exceed the buffer limit. Ordinary workspace tests cover tile planning, output depth/profile/alpha, EXIF preservation and export/reload across all eight orientations for PNG/JPEG/WebP sources in both byte orders, PNG/TIFF bit depth, PNG/WebP/TIFF straight alpha and seeded dithering, JPEG quality and linear-light flattening, stream errors, and failure-safe file publication/cancellation. The app/export path polls without blocking. GPU parity and viewport test harnesses use bounded blocking polls for deterministic readback.
+GPU tests check both sRGB viewport paths and alpha compositing, CPU/GPU parity across all basic controls, tiled-vs-untiled output, straight alpha, HDR/negative working values, and unaligned edge tiles. An additional app test checks PNG, JPEG, WebP and TIFF output against a captured basic-adjustment snapshot. The large export test processes a 6101 × 6001 image (36,612,101 pixels) with a granted 2048px texture limit and 256 MiB buffer limit, then checks every decoded 8/16-bit PNG/TIFF, lossless WebP and JPEG pixel (with a lossy tolerance for JPEG), plus a 257 × 253 streamed reduction. Both source dimensions exceed the texture limit, and a full-image readback would exceed the buffer limit. Ordinary workspace tests cover tile planning, output depth/profile/alpha, EXIF preservation and export/reload across all eight orientations for PNG/JPEG/WebP sources in both byte orders, PNG/TIFF bit depth, PNG/WebP/TIFF straight alpha and seeded dithering, JPEG quality and linear-light flattening, area-resize dimensions/color/alpha/band invariance, stream errors, and failure-safe file publication/cancellation. The app/export path polls without blocking. GPU parity and viewport test harnesses use bounded blocking polls for deterministic readback.
 
 Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Rendering of curves, detail, grading and custom nodes remains pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
 

@@ -1,6 +1,11 @@
 # Image export and metadata
 
-Desktop export renders the captured source and basic adjustments at full resolution.
+Desktop export renders the captured source and basic adjustments at full resolution by default.
+Choose Full, Long edge in pixels, or Percentage (integer 1–100%) under Size; the
+controls show the resulting dimensions. Both resize settings reduce only: a long
+edge larger than the source retains its size. Dimensions are rounded to the nearest
+pixel (halves upward), with at least one pixel per axis, using the already oriented source.
+Size is captured when the save dialog opens, together with format and adjustments.
 Choose PNG for 8-bit or 16-bit sRGB RGBA with straight alpha (default 16-bit),
 JPEG for 8-bit sRGB RGB with quality 1–100 (default 90), lossless WebP for
 8-bit sRGB RGBA with straight alpha, or uncompressed TIFF for 8/16-bit sRGB RGBA
@@ -21,6 +26,29 @@ levels (within 0.0001 of a code step for floating-point transform error), includ
 are preserved without noise. Noise depends on pixel/channel index and seed,
 so changing tile, band or TIFF strip boundaries does not change it. Sixteen-bit PNG/TIFF always quantize
 without dithering. Gamut compression and other output color spaces remain pending.
+
+Resizing area-filters the rendered full-resolution row bands on the CPU, after all
+implemented pointwise adjustments and before output color conversion, alpha flattening,
+dithering and quantization. It averages premultiplied linear Rec.2020 RGB and alpha,
+then returns to straight alpha in half-float storage. Negative and HDR finite RGB
+are retained until output conversion. Fully transparent hidden color contributes nothing;
+a footprint containing only transparent samples produces zero RGB. Non-finite RGB channels contribute zero;
+non-finite alpha becomes zero, and finite alpha is clamped to [0,1] for filtering.
+Full or equivalent dimensions bypass filtering exactly, preserving hidden color.
+This is area reduction; enlargement and output sharpening remain pending.
+
+Integer footprint boundaries use global source/output coordinates. One horizontally
+filtered row is cached for vertical overlaps, so changing GPU tile or input band
+sizes does not change output pixels. Resizing retains one input band and two f64
+output-width rows plus one f16 output row. The three resize rows are capped at a
+combined 64 MiB with fallible allocation, in addition to the normal source, GPU tiles,
+input band and format-specific encoder buffers. It never allocates a full resized
+working image. Every source tile is still rendered; reducing output dimensions reduces
+encoder memory, not source rendering work. Cancellation is checked at most every
+4096 horizontal sample contributions, during vertical accumulation/output conversion,
+and when requesting bands. Invalid source streams and late producer failures abort
+publication in all formats. Pixel-scale filters are not implemented yet; their future
+execution must respect output-pixel dimensions as specified in the plan.
 
 All formats stream GPU tiles into bounded row bands and publish the completed file
 atomically. Editing, changing export controls or opening another image does not change
@@ -138,3 +166,11 @@ invalid lengths, producer errors and cancellation during conversion fail before 
 WebP tests exercise exact RGBA equality against PNG8 for several seeds/band sizes, the
 16384px dimension boundary, buffer/metadata limits, invalid streams, output/flush failures,
 and cancellation during conversion and output writes with destination preservation.
+
+Resize tests compare an independent direct 2D area reference across fractional ratios,
+thin images, negative/HDR/alpha pixels and band sizes, plus limits, non-finite values,
+stream failures and cancellation. Software-GPU tests cover every format/depth,
+nonlinear captured adjustments, long-edge/percentage/identity sizes, metadata,
+dither/tile invariance, and 6101 × 6001 to 257 × 253 reduction with all tiles consumed.
+Source EXIF dimension and thumbnail tags are retained unchanged when resizing, subject
+to the metadata limitations above; encoded dimensions describe the resized image.

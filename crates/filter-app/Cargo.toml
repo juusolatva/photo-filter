@@ -15,10 +15,10 @@ wgpu.workspace = true
 rfd.workspace = true
 bytemuck.workspace = true
 tempfile.workspace = true
+half.workspace = true
 
 [dev-dependencies]
 image.workspace = true
-half.workspace = true
 png.workspace = true
 tiff.workspace = true
 pollster = "1"
