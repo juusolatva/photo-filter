@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, ${{ matrix.backend }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            backend: vulkan
+          - os: windows-2025
+            backend: dx12
+    env:
+      WGPU_BACKEND: ${{ matrix.backend }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+
+      - name: Select stable Rust
+        run: rustup default stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Linux dependencies and configure lavapipe
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            pkg-config libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev \
+            libxi-dev libxcursor-dev libxinerama-dev libegl1-mesa-dev \
+            libvulkan1 mesa-vulkan-drivers
+          install -d -m 700 "$RUNNER_TEMP/xdg-runtime"
+          echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg-runtime" >> "$GITHUB_ENV"
+          lavapipe_icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          test -f "${lavapipe_icds[0]}"
+          echo "VK_DRIVER_FILES=${lavapipe_icds[0]}" >> "$GITHUB_ENV"
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+      # Ignored tests require a software adapter and fail if absent.
+      # Run serially to bound memory/device pressure, including the 36.6MP fixture.
+      # Windows uses its built-in DX12 WARP adapter; Linux uses the ICD above.
+      - name: Run software-GPU and large-image export tests
+        run: cargo test --workspace --locked -- --ignored --test-threads=1 --nocapture

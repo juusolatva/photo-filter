@@ -51,7 +51,8 @@ fn snapshots() -> Vec<BasicAdjustments> {
 fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY)
+                & wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = instance
@@ -61,6 +62,7 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
             })
             .await
             .expect("software adapter required");
+        eprintln!("Software GPU: {:?}", adapter.get_info());
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let (w, h) = (67, 3);
         let image = ImageBuffer::new(

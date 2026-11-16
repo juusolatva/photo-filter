@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 fn tiles_match_untiled_and_cpu_with_straight_alpha_and_unaligned_edges() {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY)
+                & wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = instance
@@ -19,6 +20,7 @@ fn tiles_match_untiled_and_cpu_with_straight_alpha_and_unaligned_edges() {
             })
             .await
             .expect("software adapter required");
+        eprintln!("Software GPU: {:?}", adapter.get_info());
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let (w, h) = (67, 35);
         let image = ImageBuffer::new(
