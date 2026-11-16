@@ -18,7 +18,7 @@ a transparent PNG, a sharp pixel grid and a photo larger than 36 MP ready.
 
 ## Adjustments and histogram
 
-- [ ] Move every basic slider, then **Reset adjustments**; preview changes and returns to neutral.
+- [ ] Move every basic slider; the preview changes. Click **Reset adjustments**; the preview returns to neutral.
 - [ ] Drag sliders rapidly; preview and histogram settle on the final settings without freezing.
 - [ ] Pan and zoom; histogram stays unchanged. Edit exposure; curves and clipping counts update.
 - [ ] Hover the histogram; counts appear. During updates, old curves dim and old counts are hidden.
@@ -48,7 +48,8 @@ source pixel, so its color can differ from the blended screen color at Fit or fr
 - [ ] Export and reopen PNG and TIFF at both 8/16-bit, JPEG and lossless WebP; dimensions, orientation and edits are correct.
 - [ ] Export transparent areas; PNG/WebP/TIFF retain alpha, and JPEG uses the selected background without dark edge halos.
 - [ ] Try **Full**, **Long edge** and **Percentage**; reopened dimensions match the preview and aspect ratio is preserved.
-- [ ] Change JPEG quality and toggle 8-bit dithering; controls work and files reopen. TIFF clearly states camera metadata is omitted.
+- [ ] Change JPEG quality and toggle 8-bit dithering; controls work and files reopen.
+- [ ] Select TIFF; the export controls clearly state that camera metadata is omitted.
 - [ ] Start a large export, then edit or open another image; the UI remains usable and the output retains the captured image/settings.
 - [ ] Cancel an export replacing a disposable existing file; its original contents survive. Allow WebP compression to finish before expecting cancellation to complete.
 - [ ] Try exporting to an unwritable location; an error appears without damaging an existing destination.
