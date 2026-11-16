@@ -154,12 +154,5 @@ pub fn relative_white_balance(temperature: f32, tint: f32) -> Matrix3 {
     product(XYZ_REC2020, product(inverse, product(scaled, REC2020_XYZ)))
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn transfer_preserves_extended_range() {
-        for x in [-2.0, -0.1, 0.0, 0.001, 0.5, 1.0, 4.0] {
-            assert!((srgb_to_linear(linear_to_srgb(x)) - x).abs() < 0.00001);
-        }
-    }
-}
+#[path = "../tests/unit/color_tests.rs"]
+mod tests;

@@ -114,6 +114,19 @@ These headless checks do not exercise native window interaction or file dialogs.
 Software-GPU viewport tests run before the separate large-image regression so
 rendering failures surface without waiting for the 36.6MP exports.
 
+The separate **SonarQube** job runs the ordinary workspace tests with
+`cargo-llvm-cov` and uploads LCOV coverage and source analysis to SonarQube Cloud.
+Fork and Dependabot pull requests still run coverage but skip the authenticated
+analysis. Pushes to `main`, same-repository pull requests and manual runs publish
+analysis using the repository's `SONAR_TOKEN` secret. Scanner packages use a weekly
+cache saved only from `main`. The coverage report excludes the ignored GPU and
+large-image tests, which continue to run in the Linux/Windows matrix.
+Unit-test modules live under each crate's `tests/unit` directory so coverage
+excludes their bodies and SonarCloud can detect them as tests. CI passes an
+absolute LCOV path because SonarCloud analyzes each crate as a separate module.
+The scan step pins the SonarCloud URL in its arguments, overriding checked-out
+configuration.
+
 GPU tests check both sRGB viewport paths and alpha compositing, CPU/GPU parity across all basic controls, tiled-vs-untiled output, straight alpha, HDR/negative working values, and unaligned edge tiles. An additional app test checks PNG, JPEG, WebP and TIFF output against a captured basic-adjustment snapshot. The large export test processes a 6101 × 6001 image (36,612,101 pixels) with a granted 2048px texture limit and 256 MiB buffer limit, then checks every decoded 8/16-bit PNG/TIFF, lossless WebP and JPEG pixel (with a lossy tolerance for JPEG), plus a 257 × 253 streamed reduction. Both source dimensions exceed the texture limit, and a full-image readback would exceed the buffer limit. Ordinary workspace tests cover tile planning, output depth/profile/alpha, EXIF preservation and export/reload across all eight orientations for PNG/JPEG/WebP sources in both byte orders, PNG/TIFF bit depth, PNG/WebP/TIFF straight alpha and seeded dithering, JPEG quality and linear-light flattening, area-resize dimensions/color/alpha/band invariance, stream errors, and failure-safe file publication/cancellation. The app/export path polls without blocking. GPU parity and viewport test harnesses use bounded blocking polls for deterministic readback.
 
 The region-preview software-GPU test compares cached tiles against untiled rendering
