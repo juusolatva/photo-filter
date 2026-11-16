@@ -75,7 +75,11 @@ jobs:
         run: cargo test --workspace --locked
 
       # Ignored tests require a software adapter and fail if absent.
-      # Run serially to bound memory/device pressure, including the 36.6MP fixture.
+      # Run serially to bound memory/device pressure. Check viewport regressions
+      # before the expensive 36.6MP fixture so failures surface promptly.
       # Windows uses its built-in DX12 WARP adapter; Linux uses the ICD above.
-      - name: Run software-GPU and large-image export tests
-        run: cargo test --workspace --locked -- --ignored --test-threads=1 --nocapture
+      - name: Run software-GPU tests
+        run: cargo test --workspace --locked -- --ignored --skip large_image_exports --test-threads=1 --nocapture
+
+      - name: Run large-image export regression
+        run: cargo test -p filter-app --locked large_image_exports -- --ignored --test-threads=1 --nocapture

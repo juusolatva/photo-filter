@@ -1,6 +1,6 @@
 use crate::export::{ExportFormat, ExportJob, ExportResult};
 use crate::preset_ui::{Action as PresetAction, PresetUi};
-use crate::preview::PreviewCallback;
+use crate::preview::{PreviewCallback, RegionPreview, needs_regions, pixel_aligned};
 use crate::resize::ExportResize;
 use eframe::egui;
 use filter_core::{
@@ -9,7 +9,7 @@ use filter_core::{
     edit::{EditState, ModelError},
     preset::Preset,
 };
-use filter_gpu::{ExposureRenderer, SourceTexture};
+use filter_gpu::{ExposureFrame, ExposureRenderer, ExposureUpdates, SourceTexture};
 use filter_io::DecodedImage;
 use std::{
     path::PathBuf,
@@ -52,6 +52,10 @@ pub struct PhotoApp {
     renderer: Arc<ExposureRenderer>,
     source: Option<Arc<DecodedImage>>,
     texture: Option<SourceTexture>,
+    preview_frame: Option<ExposureFrame>,
+    preview_updates: ExposureUpdates,
+    regions: RegionPreview,
+    proxy_scale: f32,
     load_tx: mpsc::Sender<(u64, PathBuf)>,
     load_rx: mpsc::Receiver<LoadResult>,
     dialog_tx: mpsc::Sender<DialogResult>,
@@ -64,6 +68,7 @@ pub struct PhotoApp {
     adjustments: Result<BasicAdjustments, ModelError>,
     presets: PresetUi,
     zoom: f32,
+    native_pixels: bool,
     pan: egui::Vec2,
     export: Option<ExportJob>,
     export_status: String,
@@ -81,6 +86,12 @@ impl PhotoApp {
             .as_ref()
             .expect("wgpu renderer configured");
         let renderer = Arc::new(ExposureRenderer::new(&rs.device, rs.target_format));
+        let regions = RegionPreview::new(
+            renderer.clone(),
+            rs.device.clone(),
+            rs.queue.clone(),
+            cc.egui_ctx.clone(),
+        );
         let (load_tx, jobs) = mpsc::channel::<(u64, PathBuf)>();
         let (results, load_rx) = mpsc::channel();
         let (dialog_tx, dialog_rx) = mpsc::channel();
@@ -109,6 +120,10 @@ impl PhotoApp {
             renderer,
             source: None,
             texture: None,
+            preview_frame: None,
+            preview_updates: ExposureUpdates::new(&rs.device, &rs.queue),
+            regions,
+            proxy_scale: 1.0,
             load_tx,
             load_rx,
             dialog_tx,
@@ -121,6 +136,7 @@ impl PhotoApp {
             adjustments: Ok(BasicAdjustments::default()),
             presets: PresetUi::default(),
             zoom: 1.0,
+            native_pixels: false,
             pan: egui::Vec2::ZERO,
             export: None,
             export_status: String::new(),
@@ -327,6 +343,10 @@ impl eframe::App for PhotoApp {
             self.loading = false;
             match result {
                 Ok((source, proxy)) => {
+                    self.regions.reset();
+                    self.preview_frame = None;
+                    self.proxy_scale = (proxy.width() as f32 / source.buffer.width() as f32)
+                        .min(proxy.height() as f32 / source.buffer.height() as f32);
                     self.texture = Some(self.renderer.upload(&rs.device, &rs.queue, &proxy));
                     self.status = format!(
                         "{} · {} × {} · preview {} × {}",
@@ -340,6 +360,7 @@ impl eframe::App for PhotoApp {
                     self.presets = PresetUi::default();
                     self.replace_edit(EditState::default());
                     self.zoom = 1.0;
+                    self.native_pixels = false;
                     self.pan = egui::Vec2::ZERO;
                 }
                 Err(error) => self.status = format!("Could not open {}: {error}", path.display()),
@@ -364,6 +385,7 @@ impl eframe::App for PhotoApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.dialog(&ctx);
         }
+        let mut native_zoom = false;
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
@@ -374,8 +396,13 @@ impl eframe::App for PhotoApp {
                 }
                 if ui.button("Fit").clicked() {
                     self.zoom = 1.0;
+                    self.native_pixels = false;
                     self.pan = egui::Vec2::ZERO;
                 }
+                native_zoom = ui
+                    .add_enabled(self.source.is_some(), egui::Button::new("100%"))
+                    .on_hover_text("One source pixel per physical display pixel")
+                    .clicked();
                 ui.label("Scroll to zoom · drag to pan");
                 if self.loading {
                     ui.spinner();
@@ -384,6 +411,14 @@ impl eframe::App for PhotoApp {
         });
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.label(&self.status);
+            if let Some(error) = &self.regions.error {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                if self.regions.can_retry() && ui.button("Retry preview").clicked() {
+                    // Release cached textures as well, so an allocation failure
+                    // can recover without reopening and decoding the image.
+                    self.regions.reset();
+                }
+            }
         });
         let mut adjustments_changed = false;
         egui::Panel::right("adjustments")
@@ -596,34 +631,85 @@ impl eframe::App for PhotoApp {
             {
                 let dims = egui::vec2(source.buffer.width() as f32, source.buffer.height() as f32);
                 let fit = (rect.width() / dims.x).min(rect.height() / dims.y);
+                if fit <= 0.0 {
+                    return;
+                }
+                let physical_fit = fit * ctx.pixels_per_point();
+                if native_zoom {
+                    self.native_pixels = true;
+                    self.pan = egui::Vec2::ZERO;
+                }
+                if self.native_pixels {
+                    self.zoom = 1.0 / physical_fit;
+                }
                 if response.dragged() {
                     self.pan += response.drag_delta();
                 }
                 if response.hovered() {
                     let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
                     if scroll != 0.0 {
+                        self.native_pixels = false;
                         let old = self.zoom;
-                        self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(0.1, 32.0);
+                        self.zoom = (self.zoom * (scroll * 0.002).exp()).clamp(
+                            (0.01 / physical_fit).min(0.1),
+                            (32.0 / physical_fit).max(1.0),
+                        );
                         if let Some(pointer) = response.hover_pos() {
                             let offset = pointer - rect.center();
                             self.pan = offset - (offset - self.pan) * (self.zoom / old);
                         }
                     }
                 }
-                let image_rect =
+                let mut image_rect =
                     egui::Rect::from_center_size(rect.center() + self.pan, dims * fit * self.zoom);
-                let visible = image_rect.intersect(rect);
+                if self.native_pixels {
+                    // Keep source texel boundaries on physical pixel boundaries at
+                    // 100%, including after panning, resizing or a DPI change.
+                    image_rect = pixel_aligned(image_rect, ctx.pixels_per_point());
+                }
+                let mut visible = image_rect.intersect(rect);
+                if self.native_pixels {
+                    visible = pixel_aligned(visible, ctx.pixels_per_point());
+                }
                 if visible.is_positive() {
                     let origin = (visible.min - image_rect.min) / image_rect.size();
                     let extent = visible.size() / image_rect.size();
+                    let uv = [origin.x, origin.y, extent.x, extent.y];
+                    let preview_frame = self.preview_frame.get_or_insert_with(|| {
+                        self.renderer
+                            .frame_region_adjusted(&rs.device, texture, adjustments, uv)
+                    });
+                    self.renderer.update_frame(
+                        &mut self.preview_updates,
+                        preview_frame,
+                        adjustments,
+                        uv,
+                        [0.0, 0.0, 1.0, 1.0],
+                    );
+                    let mut frames = vec![preview_frame.clone()];
+                    let physical_scale = if self.native_pixels {
+                        1.0
+                    } else {
+                        physical_fit * self.zoom
+                    };
+                    if needs_regions(self.proxy_scale, physical_scale) {
+                        frames.extend(self.regions.frames(
+                            &self.renderer,
+                            &rs.device,
+                            &mut self.preview_updates,
+                            source,
+                            egui::Rect::from_min_size(
+                                egui::pos2(origin.x * dims.x, origin.y * dims.y),
+                                egui::vec2(extent.x * dims.x, extent.y * dims.y),
+                            ),
+                            adjustments,
+                        ));
+                    }
+                    self.preview_updates.flush();
                     let callback = PreviewCallback {
                         renderer: self.renderer.clone(),
-                        frame: self.renderer.frame_region_adjusted(
-                            &rs.device,
-                            texture,
-                            adjustments,
-                            [origin.x, origin.y, extent.x, extent.y],
-                        ),
+                        frames,
+                        viewport: visible,
                     };
                     ui.painter()
                         .with_clip_rect(rect)
