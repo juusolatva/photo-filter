@@ -16,9 +16,25 @@ struct Pending {
     pixels: u64,
     ready: Receiver<Result<(), wgpu::BufferAsyncError>>,
 }
+
 struct Slot {
     buffer: wgpu::Buffer,
     pending: Option<Pending>,
+    replace_on_submit: bool,
+}
+impl Slot {
+    fn new(device: &wgpu::Device) -> Self {
+        Self {
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("histogram readback"),
+                size: BYTES,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            pending: None,
+            replace_on_submit: false,
+        }
+    }
 }
 
 pub struct GpuHistogram {
@@ -62,15 +78,7 @@ impl GpuHistogram {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let slots = std::array::from_fn(|_| Slot {
-            buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("histogram readback"),
-                size: BYTES,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            }),
-            pending: None,
-        });
+        let slots = std::array::from_fn(|_| Slot::new(device));
         Ok(Self {
             pipeline,
             params,
@@ -110,6 +118,11 @@ impl GpuHistogram {
         let Some(slot) = self.slots.iter_mut().find(|s| s.pending.is_none()) else {
             return Ok(false);
         };
+        if slot.replace_on_submit {
+            // A failed/disconnected map has no usable mapped view. Retire that
+            // buffer rather than unmapping an idle buffer or reusing map state.
+            *slot = Slot::new(device);
+        }
         if self
             .bindings
             .as_ref()
@@ -167,7 +180,8 @@ impl GpuHistogram {
     }
 
     /// Call after the app's ordinary nonblocking device poll. Each returned slot
-    /// is unmapped before reuse. Tags let the caller reject superseded results.
+    /// is unmapped after successful mapping; failed buffers are replaced on the
+    /// next submission. Tags let the caller reject superseded results.
     pub fn collect(&mut self) -> Vec<(u64, Result<Histogram>)> {
         let mut results = Vec::new();
         for slot in &mut self.slots {
@@ -182,6 +196,7 @@ impl GpuHistogram {
                 Ok(result) => result.context("Histogram mapping failed"),
             };
             let pending = slot.pending.take().unwrap();
+            let mapping_succeeded = mapping.is_ok();
             let result = mapping.and_then(|()| {
                 let mapped = slot.buffer.slice(..).get_mapped_range()?;
                 let words: Vec<u32> = mapped
@@ -197,9 +212,108 @@ impl GpuHistogram {
                 );
                 Ok(histogram)
             });
-            slot.buffer.unmap();
+            if mapping_succeeded {
+                slot.buffer.unmap();
+            } else {
+                // unmap() on an unmapped buffer is a wgpu validation error.
+                // A disconnected callback also leaves map state uncertain.
+                slot.replace_on_submit = true;
+            }
             results.push((pending.generation, result));
         }
         results
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ExposureRenderer;
+    use filter_core::ImageBuffer;
+    use half::f16;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+    fn failed_mapping_and_disconnected_callbacks_allow_retry_without_validation_errors() {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY)
+                    & wgpu::Backends::PRIMARY,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: true,
+                    ..Default::default()
+                })
+                .await
+                .expect("software adapter required");
+            eprintln!("Software GPU: {:?}", adapter.get_info());
+            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let renderer = ExposureRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+            let source = renderer.upload(
+                &device,
+                &queue,
+                &ImageBuffer::new(1, 1, vec![[f16::ONE; 4]]).unwrap(),
+            );
+            let settings = BasicAdjustments::default();
+            for disconnected in [false, true] {
+                let mut gpu = GpuHistogram::new(&device).unwrap();
+                let old_buffer = gpu.slots[0].buffer.clone();
+                let (tx, ready) = mpsc::sync_channel(1);
+                // Model failed map_async leaving the buffer unmapped, without
+                // depending on real memory exhaustion or losing the test device.
+                if !disconnected {
+                    tx.send(Err(wgpu::BufferAsyncError)).unwrap();
+                }
+                drop(tx);
+                gpu.slots[0].pending = Some(Pending {
+                    generation: 10,
+                    pixels: 1,
+                    ready,
+                });
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let failed = gpu.collect();
+                let validation = scope.pop().await;
+                assert!(
+                    validation.is_none(),
+                    "failed readback must not unmap an idle buffer: {validation:?}"
+                );
+                assert_eq!(failed.len(), 1);
+                assert_eq!(failed[0].0, 10);
+                assert!(failed[0].1.is_err());
+                assert!(!gpu.is_pending());
+
+                let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                assert!(
+                    gpu.try_submit(&device, &queue, &source, &settings, 11)
+                        .unwrap()
+                );
+                assert_ne!(
+                    old_buffer, gpu.slots[0].buffer,
+                    "retry must replace the failed readback buffer"
+                );
+                let deadline = Instant::now() + Duration::from_secs(30);
+                let completed = loop {
+                    device.poll(wgpu::PollType::Poll).unwrap();
+                    let completed = gpu.collect();
+                    if !completed.is_empty() {
+                        break completed;
+                    }
+                    assert!(Instant::now() < deadline, "histogram retry timed out");
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                let validation = scope.pop().await;
+                assert!(
+                    validation.is_none(),
+                    "retry validation error: {validation:?}"
+                );
+                assert_eq!(completed.len(), 1);
+                assert_eq!(completed[0].0, 11);
+                assert_eq!(completed[0].1.as_ref().unwrap().sampled, 1);
+                assert!(!gpu.is_pending());
+            }
+        });
     }
 }

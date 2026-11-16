@@ -48,6 +48,9 @@ buffer is cleared before every dispatch. Commands clear, compute and copy in que
 order, keeping each submitted adjustment snapshot independent. A busy slot is never
 overwritten; submission returns `false` when both are occupied. Collection validates
 bin totals and source pixel counts, drops the mapped view, then unmaps before reuse.
+Mapping errors or disconnected callbacks retire the affected buffer without calling
+`unmap` on an unmapped buffer. Its next submission allocates a fresh staging buffer,
+so retry does not reuse uncertain mapping state or raise an unmapped-buffer validation error.
 
 The app coalesces edit changes to its latest desired generation and rejects old
 completions and errors. Successful image replacement invalidates old generations even
@@ -78,3 +81,6 @@ source replacement while pending, reuse after unmapping, counter clearing, inval
 samples, edge workgroups and device/source limits. App tests cover stale generations,
 unsupported edits, retry and coalescing; a software-GPU headless egui test also checks
 idle behavior and panel rendering. These checks do not exercise a native desktop window.
+An additional software-GPU regression injects mapping failure and callback disconnection,
+checks that collection produces no wgpu validation errors, and verifies successful retry
+with a replacement buffer.

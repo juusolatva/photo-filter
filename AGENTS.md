@@ -10,6 +10,7 @@ Native Rust/egui photo editor for Linux and Windows. Read `README.md` for implem
 - Source pixels are straight-alpha, half-float linear Rec.2020. Sampled viewport textures are premultiplied. Spatial sampling must preserve alpha correctness and filtering borders.
 - Display/export currently use sRGB clipping. Do not describe planned gamut compression, spatial filters or other unfinished features as implemented.
 - The app shares eframe's GPU device and queue with background work. Never use blocking GPU polls or synchronous readback on the UI thread. Bound pending jobs and discard results from older images/edits.
+- Only unmap readback buffers after a successful mapping. Retire and recreate buffers after mapping errors or disconnected callbacks; unmapping an idle buffer is a wgpu validation error. Check API assumptions against the versions in `Cargo.lock` and their dependency sources.
 - Bound GPU allocations, readback and caches. Large images must not require full-resolution GPU textures or full-image readback buffers.
 - Derive tile sampling from shared physical viewport coordinates. Windows/WARP exposed errors from hardware sampler precision and per-quad UV interpolation; preserve explicit float interpolation and strict pixel comparisons.
 - Preserve export snapshots, cancellation and atomic destination publication. Failure before publication must leave existing files intact. See `docs/export.md`.
