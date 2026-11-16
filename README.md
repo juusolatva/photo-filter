@@ -11,7 +11,7 @@ cargo run -p filter-app -- --software-gpu path/to/photo.png
 
 Use **Open image**, **Ctrl+O**, or drag a file onto the window. Drag to pan, scroll to zoom, and select **Fit** to reset the view. **100%** shows one source pixel per physical display pixel, with pixel-aligned panning; this scale survives window resizing and display scaling changes until you scroll or select Fit. Exposure ranges from −5 to +5 EV. Relative temperature/tint, brightness, contrast, highlights/shadows, whites/blacks, vibrance and saturation range from −1 to +1. All edits leave the source untouched; **Reset adjustments** returns these controls to neutral while preserving other edit sections.
 
-Above the proxy's native display scale, visible regions progressively refine with
+At 100% zoom and above, visible regions progressively refine with
 full-resolution source tiles. A background worker uploads one tile at a time on the
 viewer's GPU device, while the proxy fills areas awaiting refinement. The cache holds
 at most 63 source tiles of up to 512 × 512 pixels, with one-pixel filtering borders,
@@ -20,6 +20,14 @@ Very large visible source regions refine a central subset and retain the proxy e
 Tiles survive panning and adjustment changes; each draw uses the current basic settings,
 and results from a previous image are discarded. No full-image GPU texture or region
 readback is required. Spatial filtering, GPU histogram and cursor probe remain pending.
+Below 100%, the area-filtered proxy stays visible to avoid aliasing from minifying
+single-level source tiles; filtered region rendering at intermediate scales remains pending.
+Viewport bilinear interpolation uses explicit float math to avoid adapter-dependent
+sampler weight precision near high-contrast tile boundaries.
+Tile uniform buffers and bind groups are reused across repaints, with parameter updates
+batched through reusable staging memory. A failed tile leaves its area on the proxy while
+other tiles continue refining. **Retry preview** frees the cache and retries failed tiles
+without reopening the image. An unavailable worker is reported separately.
 
 Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
 
@@ -95,7 +103,9 @@ GPU tests check both sRGB viewport paths and alpha compositing, CPU/GPU parity a
 The region-preview software-GPU test compares cached tiles against untiled rendering
 at native and fractional scales, including alpha, clipped regions and filtering seams
 on both sRGB viewport paths. It also covers stale image uploads, adjustment changes,
-cache reuse and eviction. Ordinary tests cover fractional tile coverage, memory bounds
+cache reuse and eviction, persistent bindings across edits/panning, and injected tile
+failures, retry, channel backpressure and worker disconnection. Ordinary tests cover the
+100% refinement threshold, fractional tile coverage, memory bounds
 and physical-pixel alignment at several display scales. Native Linux/Windows interaction
 and refinement latency still require desktop validation.
 

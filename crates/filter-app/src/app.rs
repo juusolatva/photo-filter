@@ -1,6 +1,6 @@
 use crate::export::{ExportFormat, ExportJob, ExportResult};
 use crate::preset_ui::{Action as PresetAction, PresetUi};
-use crate::preview::{PreviewCallback, RegionPreview, pixel_aligned};
+use crate::preview::{PreviewCallback, RegionPreview, needs_regions, pixel_aligned};
 use crate::resize::ExportResize;
 use eframe::egui;
 use filter_core::{
@@ -9,7 +9,7 @@ use filter_core::{
     edit::{EditState, ModelError},
     preset::Preset,
 };
-use filter_gpu::{ExposureRenderer, SourceTexture};
+use filter_gpu::{ExposureFrame, ExposureRenderer, ExposureUpdates, SourceTexture};
 use filter_io::DecodedImage;
 use std::{
     path::PathBuf,
@@ -52,6 +52,8 @@ pub struct PhotoApp {
     renderer: Arc<ExposureRenderer>,
     source: Option<Arc<DecodedImage>>,
     texture: Option<SourceTexture>,
+    preview_frame: Option<ExposureFrame>,
+    preview_updates: ExposureUpdates,
     regions: RegionPreview,
     proxy_scale: f32,
     load_tx: mpsc::Sender<(u64, PathBuf)>,
@@ -118,6 +120,8 @@ impl PhotoApp {
             renderer,
             source: None,
             texture: None,
+            preview_frame: None,
+            preview_updates: ExposureUpdates::new(&rs.device, &rs.queue),
             regions,
             proxy_scale: 1.0,
             load_tx,
@@ -340,6 +344,7 @@ impl eframe::App for PhotoApp {
             match result {
                 Ok((source, proxy)) => {
                     self.regions.reset();
+                    self.preview_frame = None;
                     self.proxy_scale = (proxy.width() as f32 / source.buffer.width() as f32)
                         .min(proxy.height() as f32 / source.buffer.height() as f32);
                     self.texture = Some(self.renderer.upload(&rs.device, &rs.queue, &proxy));
@@ -408,6 +413,11 @@ impl eframe::App for PhotoApp {
             ui.label(&self.status);
             if let Some(error) = &self.regions.error {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
+                if self.regions.can_retry() && ui.button("Retry preview").clicked() {
+                    // Release cached textures as well, so an allocation failure
+                    // can recover without reopening and decoding the image.
+                    self.regions.reset();
+                }
             }
         });
         let mut adjustments_changed = false;
@@ -664,18 +674,29 @@ impl eframe::App for PhotoApp {
                 if visible.is_positive() {
                     let origin = (visible.min - image_rect.min) / image_rect.size();
                     let extent = visible.size() / image_rect.size();
-                    let mut frames = vec![self.renderer.frame_region_adjusted(
-                        &rs.device,
-                        texture,
+                    let uv = [origin.x, origin.y, extent.x, extent.y];
+                    let preview_frame = self.preview_frame.get_or_insert_with(|| {
+                        self.renderer
+                            .frame_region_adjusted(&rs.device, texture, adjustments, uv)
+                    });
+                    self.renderer.update_frame(
+                        &mut self.preview_updates,
+                        preview_frame,
                         adjustments,
-                        [origin.x, origin.y, extent.x, extent.y],
-                    )];
-                    // Beyond the proxy's native scale, progressively overlay source
-                    // tiles. Small images already use their full source as the proxy.
-                    if self.proxy_scale < 1.0 && physical_fit * self.zoom > self.proxy_scale {
+                        uv,
+                        [0.0, 0.0, 1.0, 1.0],
+                    );
+                    let mut frames = vec![preview_frame.clone()];
+                    let physical_scale = if self.native_pixels {
+                        1.0
+                    } else {
+                        physical_fit * self.zoom
+                    };
+                    if needs_regions(self.proxy_scale, physical_scale) {
                         frames.extend(self.regions.frames(
                             &self.renderer,
                             &rs.device,
+                            &mut self.preview_updates,
                             source,
                             egui::Rect::from_min_size(
                                 egui::pos2(origin.x * dims.x, origin.y * dims.y),
@@ -684,6 +705,7 @@ impl eframe::App for PhotoApp {
                             adjustments,
                         ));
                     }
+                    self.preview_updates.flush();
                     let callback = PreviewCallback {
                         renderer: self.renderer.clone(),
                         frames,

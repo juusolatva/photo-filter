@@ -1,6 +1,6 @@
 use eframe::egui;
 use filter_core::cpu_eval::BasicAdjustments;
-use filter_gpu::{ExposureFrame, ExposureRenderer, SourceTexture, Tile};
+use filter_gpu::{ExposureFrame, ExposureRenderer, ExposureUpdates, SourceTexture, Tile};
 use filter_io::DecodedImage;
 use std::sync::{Arc, mpsc};
 
@@ -25,6 +25,16 @@ const TILE_EDGE: u32 = 512;
 // Includes the one-pixel filtering border on every side, at 8 bytes/pixel.
 const CACHE_BYTES: usize = 128 * 1024 * 1024;
 const CACHE_TILES: usize = CACHE_BYTES / ((TILE_EDGE as usize + 2).pow(2) * 8);
+const _: () = assert!(
+    CACHE_TILES > 0,
+    "preview budget must hold at least one bordered tile"
+);
+
+/// Single-level source textures must not replace the area-filtered proxy while
+/// minifying. A mip/area-filtered region path can lower this threshold later.
+pub fn needs_regions(proxy_scale: f32, physical_scale: f32) -> bool {
+    proxy_scale < 1.0 && physical_scale >= 1.0
+}
 
 /// Align native-resolution image and callback bounds to the physical display grid.
 pub fn pixel_aligned(rect: egui::Rect, pixels_per_point: f32) -> egui::Rect {
@@ -46,6 +56,7 @@ struct Request {
 struct CachedTile {
     tile: Tile,
     texture: SourceTexture,
+    frame: Option<ExposureFrame>,
     used: u64,
 }
 type TileResult = (u64, Tile, Result<SourceTexture, String>);
@@ -57,6 +68,8 @@ pub struct RegionPreview {
     requests: mpsc::SyncSender<Request>,
     results: mpsc::Receiver<TileResult>,
     cache: Vec<CachedTile>,
+    failed: Vec<Tile>,
+    worker_available: bool,
     generation: u64,
     pending: bool,
     clock: u64,
@@ -92,6 +105,8 @@ impl RegionPreview {
             requests,
             results,
             cache: Vec::new(),
+            failed: Vec::new(),
+            worker_available: true,
             generation: 0,
             pending: false,
             clock: 0,
@@ -103,6 +118,7 @@ impl RegionPreview {
     pub fn reset(&mut self) {
         self.generation += 1;
         self.cache.clear();
+        self.failed.clear();
         self.error = None;
         // Keep the outstanding request accounted for until its result arrives.
     }
@@ -111,12 +127,23 @@ impl RegionPreview {
         &mut self,
         renderer: &ExposureRenderer,
         device: &wgpu::Device,
+        updates: &mut ExposureUpdates,
         source: &Arc<DecodedImage>,
         visible: egui::Rect,
         adjustments: &BasicAdjustments,
     ) -> Vec<ExposureFrame> {
         self.clock += 1;
-        while let Ok((generation, tile, result)) = self.results.try_recv() {
+        loop {
+            let (generation, tile, result) = match self.results.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending = false;
+                    self.worker_available = false;
+                    self.error = Some("Full-resolution preview worker unavailable".into());
+                    break;
+                }
+            };
             self.pending = false;
             if generation != self.generation {
                 continue;
@@ -136,10 +163,14 @@ impl RegionPreview {
                     self.cache.push(CachedTile {
                         tile,
                         texture,
+                        frame: None,
                         used: self.clock,
                     });
                 }
-                Err(error) => self.error = Some(format!("Full-resolution preview failed: {error}")),
+                Err(error) => {
+                    self.failed.push(tile);
+                    self.error = Some(format!("Full-resolution tile unavailable: {error}"));
+                }
             }
         }
         let width = source.buffer.width();
@@ -150,30 +181,30 @@ impl RegionPreview {
             if let Some(cached) = self.cache.iter_mut().find(|c| c.tile == *tile) {
                 cached.used = self.clock;
                 let border = with_border(*tile, width, height);
-                frames.push(renderer.frame_region_placed(
-                    device,
-                    &cached.texture,
-                    adjustments,
-                    [
-                        (tile.x - border.x) as f32 / border.width as f32,
-                        (tile.y - border.y) as f32 / border.height as f32,
-                        tile.width as f32 / border.width as f32,
-                        tile.height as f32 / border.height as f32,
-                    ],
-                    [
-                        (tile.x as f32 - visible.min.x) / visible.width(),
-                        (tile.y as f32 - visible.min.y) / visible.height(),
-                        tile.width as f32 / visible.width(),
-                        tile.height as f32 / visible.height(),
-                    ],
-                ));
+                let uv = [
+                    (tile.x - border.x) as f32 / border.width as f32,
+                    (tile.y - border.y) as f32 / border.height as f32,
+                    tile.width as f32 / border.width as f32,
+                    tile.height as f32 / border.height as f32,
+                ];
+                let rect = [
+                    (tile.x as f32 - visible.min.x) / visible.width(),
+                    (tile.y as f32 - visible.min.y) / visible.height(),
+                    tile.width as f32 / visible.width(),
+                    tile.height as f32 / visible.height(),
+                ];
+                let frame = cached.frame.get_or_insert_with(|| {
+                    renderer.frame_region_placed(device, &cached.texture, adjustments, uv, rect)
+                });
+                renderer.update_frame(updates, frame, adjustments, uv, rect);
+                frames.push(frame.clone());
             }
         }
         if !self.pending
-            && self.error.is_none()
+            && self.worker_available
             && let Some(tile) = wanted
                 .iter()
-                .find(|t| !self.cache.iter().any(|c| c.tile == **t))
+                .find(|t| !self.failed.contains(t) && !self.cache.iter().any(|c| c.tile == **t))
         {
             let request = Request {
                 generation: self.generation,
@@ -183,10 +214,19 @@ impl RegionPreview {
             };
             match self.requests.try_send(request) {
                 Ok(()) => self.pending = true,
-                Err(_) => self.error = Some("Full-resolution preview worker unavailable".into()),
+                // A full queue already contains work whose result will wake us.
+                Err(mpsc::TrySendError::Full(_)) => self.pending = true,
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.worker_available = false;
+                    self.error = Some("Full-resolution preview worker unavailable".into());
+                }
             }
         }
         frames
+    }
+
+    pub fn can_retry(&self) -> bool {
+        self.worker_available && !self.failed.is_empty()
     }
 }
 
@@ -250,6 +290,19 @@ mod tests {
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, height))
+    }
+
+    #[test]
+    fn minified_views_keep_the_area_filtered_proxy() {
+        for proxy_scale in [0.01, 2048.0 / 6000.0, 0.75] {
+            for physical_scale in [proxy_scale, (proxy_scale + 1.0) * 0.5, 0.999] {
+                assert!(!needs_regions(proxy_scale, physical_scale));
+            }
+            assert!(needs_regions(proxy_scale, 1.0));
+            assert!(needs_regions(proxy_scale, 1.25));
+        }
+        assert!(!needs_regions(1.0, 1.0));
+        assert!(!needs_regions(1.0, 8.0));
     }
 
     #[test]
@@ -349,13 +402,15 @@ mod tests {
         regions: &mut RegionPreview,
         renderer: &ExposureRenderer,
         device: &wgpu::Device,
+        updates: &mut ExposureUpdates,
         source: &Arc<DecodedImage>,
         visible: egui::Rect,
         settings: &BasicAdjustments,
     ) -> Vec<ExposureFrame> {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let frames = regions.frames(renderer, device, source, visible, settings);
+            let frames = regions.frames(renderer, device, updates, source, visible, settings);
+            updates.flush();
             assert!(regions.error.is_none(), "{:?}", regions.error);
             if !regions.pending {
                 assert_eq!(
@@ -460,6 +515,105 @@ mod tests {
         result
     }
 
+    fn check_tile_failure_recovery(
+        renderer: &Arc<ExposureRenderer>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) {
+        let mut regions = RegionPreview::new(
+            renderer.clone(),
+            device.clone(),
+            queue.clone(),
+            egui::Context::default(),
+        );
+        // Drive the worker protocol explicitly to inject a transient allocation
+        // failure without depending on real memory exhaustion or thread timing.
+        let (requests, jobs) = mpsc::sync_channel(1);
+        let (results_tx, results) = mpsc::sync_channel(1);
+        regions.requests = requests;
+        regions.results = results;
+        regions.edge = 16;
+        let image = source(33, 17, false);
+        let visible = rect(0.0, 0.0, 33.0, 17.0);
+        let settings = BasicAdjustments::default();
+        let mut updates = ExposureUpdates::new(device, queue);
+        let complete = |job: Request| {
+            let texture = renderer
+                .upload_region(device, queue, &job.source.buffer, job.border)
+                .unwrap();
+            results_tx
+                .send((job.generation, job.tile, Ok(texture)))
+                .unwrap();
+        };
+        regions.frames(renderer, device, &mut updates, &image, visible, &settings);
+        let first = jobs.recv_timeout(Duration::from_secs(1)).unwrap();
+        let failed_tile = first.tile;
+        results_tx
+            .send((
+                first.generation,
+                first.tile,
+                Err("simulated allocation failure".into()),
+            ))
+            .unwrap();
+        regions.frames(renderer, device, &mut updates, &image, visible, &settings);
+        assert!(regions.error.is_some());
+        assert!(regions.can_retry());
+        let second = jobs.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_ne!(second.tile, failed_tile, "other tiles must keep refining");
+        complete(second);
+        let frames = regions.frames(renderer, device, &mut updates, &image, visible, &settings);
+        updates.flush();
+        assert_eq!(frames.len(), 1);
+        let old_pending = jobs.recv_timeout(Duration::from_secs(1)).unwrap();
+        // This is the Retry preview action: free the cache, clear failed tiles,
+        // and invalidate the outstanding result without decoding the image.
+        regions.reset();
+        assert!(regions.error.is_none());
+        assert!(regions.failed.is_empty());
+        complete(old_pending);
+        assert!(
+            regions
+                .frames(renderer, device, &mut updates, &image, visible, &settings)
+                .is_empty()
+        );
+        let retried = jobs.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(retried.tile, failed_tile);
+        assert_eq!(retried.generation, regions.generation);
+        complete(retried);
+        assert_eq!(
+            regions
+                .frames(renderer, device, &mut updates, &image, visible, &settings)
+                .len(),
+            1
+        );
+        updates.flush();
+        assert!(!regions.can_retry());
+        assert!(regions.error.is_none());
+
+        // A full channel represents queued work, not a failed image. Its eventual
+        // result restores scheduling rather than permanently disabling refinement.
+        regions.pending = false;
+        regions.frames(renderer, device, &mut updates, &image, visible, &settings);
+        updates.flush();
+        assert!(regions.pending);
+        assert!(regions.error.is_none());
+        complete(jobs.recv_timeout(Duration::from_secs(1)).unwrap());
+        regions.frames(renderer, device, &mut updates, &image, visible, &settings);
+        updates.flush();
+        assert!(regions.error.is_none());
+        assert!(regions.cache.len() >= 2);
+
+        // A disconnected worker is reported as unavailable instead of hanging in
+        // the pending state or offering a tile retry that cannot restart it.
+        drop(jobs);
+        drop(results_tx);
+        regions.frames(renderer, device, &mut updates, &image, visible, &settings);
+        updates.flush();
+        assert!(!regions.pending);
+        assert!(regions.error.is_some());
+        assert!(!regions.can_retry());
+    }
+
     #[test]
     #[ignore = "requires a Vulkan/DX12/Metal software adapter"]
     fn full_resolution_regions_match_untiled_and_reject_stale_uploads() {
@@ -493,6 +647,8 @@ mod tests {
                 wgpu::TextureFormat::Rgba8UnormSrgb,
             ] {
                 let renderer = Arc::new(ExposureRenderer::new(&device, format));
+                check_tile_failure_recovery(&renderer, &device, &queue);
+                let mut updates = ExposureUpdates::new(&device, &queue);
                 let mut regions = RegionPreview::new(
                     renderer.clone(),
                     device.clone(),
@@ -505,12 +661,20 @@ mod tests {
                 let full = rect(0.0, 0.0, 67.0, 37.0);
                 assert!(
                     regions
-                        .frames(&renderer, &device, &old, full, &BasicAdjustments::default())
+                        .frames(
+                            &renderer,
+                            &device,
+                            &mut updates,
+                            &old,
+                            full,
+                            &BasicAdjustments::default()
+                        )
                         .is_empty()
                 );
                 assert!(regions.pending);
                 regions.reset();
                 let texture = renderer.upload(&device, &queue, &image.buffer);
+                let mut bindings = Vec::new();
                 for settings in [
                     BasicAdjustments::default(),
                     BasicAdjustments::exposure(1.25).unwrap(),
@@ -518,8 +682,15 @@ mod tests {
                     for (visible, size) in
                         [(full, (67, 37)), (rect(14.25, 14.5, 51.5, 21.25), (97, 69))]
                     {
-                        let frames =
-                            refined(&mut regions, &renderer, &device, &image, visible, &settings);
+                        let frames = refined(
+                            &mut regions,
+                            &renderer,
+                            &device,
+                            &mut updates,
+                            &image,
+                            visible,
+                            &settings,
+                        );
                         let expected = render(
                             &renderer,
                             &device,
@@ -545,6 +716,52 @@ mod tests {
                                 "{format:?} {visible:?}, byte {i}: tiled {a}, untiled {b}"
                             );
                         }
+                        if visible == full {
+                            // At native scale each physical pixel must reproduce
+                            // its source texel, even beside a high-contrast neighbor.
+                            for (i, (pixel, shown)) in image
+                                .buffer
+                                .pixels()
+                                .iter()
+                                .zip(actual.as_chunks::<4>().0)
+                                .enumerate()
+                            {
+                                let pixel = settings.pixel(pixel.map(f16::to_f32));
+                                let rgb = filter_core::color::rec2020_to_linear_srgb(
+                                    pixel[..3].try_into().unwrap(),
+                                );
+                                let checker = if (i % 67 / 12 + i / 67 / 12) % 2 == 0 {
+                                    0.28
+                                } else {
+                                    0.18
+                                };
+                                for (channel, linear) in rgb.iter().enumerate() {
+                                    let composite = checker * (1.0 - pixel[3])
+                                        + linear.clamp(0.0, 1.0) * pixel[3];
+                                    let expected =
+                                        (filter_core::color::linear_to_srgb(composite) * 255.0)
+                                            .round() as i32;
+                                    assert!(
+                                        (i32::from(shown[channel]) - expected).abs() <= 1,
+                                        "native pixel {i}, channel {channel}: {} vs {expected}",
+                                        shown[channel]
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    let current: Vec<_> = regions
+                        .cache
+                        .iter()
+                        .map(|c| (c.tile, c.frame.as_ref().unwrap().bind_group.clone()))
+                        .collect();
+                    if bindings.is_empty() {
+                        bindings = current;
+                    } else {
+                        assert_eq!(
+                            bindings, current,
+                            "panning and edits must reuse bind groups and their uniform buffers"
+                        );
                     }
                 }
                 // Offscreen tiles survive panning and adjustment changes without uploads.
@@ -558,6 +775,7 @@ mod tests {
                     &mut regions,
                     &renderer,
                     &device,
+                    &mut updates,
                     &large,
                     view,
                     &BasicAdjustments::default(),
@@ -568,6 +786,7 @@ mod tests {
                     &mut regions,
                     &renderer,
                     &device,
+                    &mut updates,
                     &large,
                     shifted,
                     &BasicAdjustments::default(),
@@ -584,12 +803,14 @@ mod tests {
                     egui::Context::default(),
                 );
                 assert_eq!(limited_regions.edge, 62);
+                let mut limited_updates = ExposureUpdates::new(&limited_device, &limited_queue);
                 let visible = rect(60.25, 60.5, 128.5, 125.25);
                 let settings = BasicAdjustments::exposure(-0.5).unwrap();
                 let frames = refined(
                     &mut limited_regions,
                     &limited_renderer,
                     &limited_device,
+                    &mut limited_updates,
                     &large,
                     visible,
                     &settings,

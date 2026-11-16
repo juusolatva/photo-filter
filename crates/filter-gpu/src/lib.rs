@@ -17,14 +17,60 @@ fn exposure_shader(device: &wgpu::Device, body: &str) -> wgpu::ShaderModule {
 pub struct ExposureRenderer {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
     target_is_srgb: bool,
 }
 pub struct SourceTexture {
     view: wgpu::TextureView,
 }
+#[derive(Clone)]
 pub struct ExposureFrame {
     pub bind_group: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+}
+
+/// Reusable staging memory for a viewport's many small uniform updates.
+/// Flush after updating all frames and before submitting their paint pass.
+pub struct ExposureUpdates {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    staging: wgpu::util::StagingBelt,
+    encoder: Option<wgpu::CommandEncoder>,
+}
+impl ExposureUpdates {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        Self {
+            device: device.clone(),
+            queue: queue.clone(),
+            staging: wgpu::util::StagingBelt::new(device.clone(), 16 * 1024),
+            encoder: None,
+        }
+    }
+    fn write(&mut self, target: &wgpu::Buffer, params: &[[f32; 4]; 9]) {
+        let encoder = self.encoder.get_or_insert_with(|| {
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("viewport uniform updates"),
+                })
+        });
+        let bytes = bytemuck::cast_slice(params);
+        self.staging
+            .write_buffer(
+                encoder,
+                target,
+                0,
+                wgpu::BufferSize::new(bytes.len() as u64).unwrap(),
+            )
+            .copy_from_slice(bytes);
+    }
+    /// Submit all staged updates together, then recycle staging chunks through
+    /// asynchronous mapping. The caller's regular nonblocking poll drives reuse.
+    pub fn flush(&mut self) {
+        if let Some(encoder) = self.encoder.take() {
+            self.staging.finish();
+            self.queue.submit([encoder.finish()]);
+            self.staging.recall();
+        }
+    }
 }
 impl ExposureRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
@@ -39,12 +85,6 @@ impl ExposureRenderer {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -90,16 +130,9 @@ impl ExposureRenderer {
             multiview_mask: None,
             cache: None,
         });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("proxy sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         Self {
             pipeline,
             layout,
-            sampler,
             target_is_srgb: format.is_srgb(),
         }
     }
@@ -240,14 +273,11 @@ impl ExposureRenderer {
         uv: [f32; 4],
         rect: [f32; 4],
     ) -> ExposureFrame {
-        let mut params = adjustments.uniform_rows().to_vec();
-        params.push([if self.target_is_srgb { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]);
-        params.push(uv);
-        params.push(rect);
+        let params = self.frame_params(adjustments, uv, rect);
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("exposure parameters"),
             contents: bytemuck::cast_slice(&params),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("exposure frame"),
@@ -258,16 +288,41 @@ impl ExposureRenderer {
                     resource: wgpu::BindingResource::TextureView(&source.view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
                     binding: 2,
                     resource: uniform.as_entire_binding(),
                 },
             ],
         });
-        ExposureFrame { bind_group }
+        ExposureFrame {
+            bind_group,
+            uniform,
+        }
+    }
+    /// Stage an update to a reusable frame; flush updates before painting it.
+    /// Clones share GPU resources and receive these updates too. Use separate frames
+    /// for separate draws in a submission, rather than updating one frame per draw.
+    pub fn update_frame(
+        &self,
+        updates: &mut ExposureUpdates,
+        frame: &ExposureFrame,
+        adjustments: &BasicAdjustments,
+        uv: [f32; 4],
+        rect: [f32; 4],
+    ) {
+        updates.write(&frame.uniform, &self.frame_params(adjustments, uv, rect));
+    }
+    fn frame_params(
+        &self,
+        adjustments: &BasicAdjustments,
+        uv: [f32; 4],
+        rect: [f32; 4],
+    ) -> [[f32; 4]; 9] {
+        let mut params = [[0.0; 4]; 9];
+        params[..6].copy_from_slice(adjustments.uniform_rows());
+        params[6][0] = if self.target_is_srgb { 1.0 } else { 0.0 };
+        params[7] = uv;
+        params[8] = rect;
+        params
     }
     pub fn paint(&self, pass: &mut wgpu::RenderPass<'_>, frame: &ExposureFrame) {
         pass.set_pipeline(&self.pipeline);
