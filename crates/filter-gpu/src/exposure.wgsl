@@ -9,9 +9,6 @@ struct VertexOut { @builtin(position) position: vec4<f32> }
     let p = params.rect.xy + uv * params.rect.zw;
     return VertexOut(vec4(p.x*2.0-1.0,1.0-p.y*2.0,0.0,1.0));
 }
-fn encode(c:vec3<f32>) -> vec3<f32> {
-    return select(1.055*pow(max(c,vec3(0.0)),vec3(1.0/2.4))-0.055,12.92*c,c<=vec3(0.0031308));
-}
 // Explicit f32 interpolation avoids adapter-dependent sampler weight precision.
 // At native scale, tiny UV rounding around a texel center must not pull a
 // visible amount of high-contrast color from the neighboring texel/tile border.
@@ -35,9 +32,9 @@ fn sample_source(uv: vec2<f32>) -> vec4<f32> {
     let local_uv = (viewport_uv - params.rect.xy) / params.rect.zw;
     let sample = sample_source(params.uv_rect.xy + local_uv * params.uv_rect.zw);
     let working = apply_basic(vec4(sample.rgb / max(sample.a,0.000001),sample.a),params.basic).rgb;
-    let rgb = vec3(dot(working,vec3(1.660491,-0.587641,-0.072850)),dot(working,vec3(-0.124550,1.132900,-0.008349)),dot(working,vec3(-0.018151,-0.100579,1.118730)));
+    let rgb = output_linear_srgb(working);
     let checker = select(0.18,0.28, (u32(in.position.x/12.0)+u32(in.position.y/12.0))%2u==0u);
     // Initial spike uses display clipping. Perceptual gamut compression is a later phase.
     let composite = mix(vec3(checker),clamp(rgb,vec3(0.0),vec3(1.0)),sample.a);
-    return vec4(select(encode(composite),composite,params.output.x>0.5),1.0);
+    return vec4(select(encode_srgb(composite),composite,params.output.x>0.5),1.0);
 }

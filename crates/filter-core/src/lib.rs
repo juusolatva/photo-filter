@@ -2,6 +2,7 @@
 pub mod buffer;
 pub mod color;
 pub mod edit;
+pub mod histogram;
 pub mod pipeline;
 pub mod preset;
 pub use buffer::ImageBuffer;

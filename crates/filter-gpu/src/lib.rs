@@ -2,14 +2,21 @@
 use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments};
 use wgpu::util::DeviceExt;
 
+mod histogram;
 mod tiled;
+pub use histogram::GpuHistogram;
 pub use tiled::{PendingTile, Tile, TilePlan, TiledExposure};
 
 fn exposure_shader(device: &wgpu::Device, body: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("exposure shader"),
         source: wgpu::ShaderSource::Wgsl(
-            format!("{}\n{body}", include_str!("working.wgsl")).into(),
+            format!(
+                "{}\n{}\n{body}",
+                include_str!("working.wgsl"),
+                include_str!("output.wgsl")
+            )
+            .into(),
         ),
     })
 }
@@ -22,6 +29,8 @@ pub struct ExposureRenderer {
 }
 pub struct SourceTexture {
     view: wgpu::TextureView,
+    width: u32,
+    height: u32,
 }
 #[derive(Clone)]
 pub struct ExposureFrame {
@@ -248,6 +257,8 @@ impl ExposureRenderer {
         );
         Ok(SourceTexture {
             view: texture.create_view(&Default::default()),
+            width: region.width,
+            height: region.height,
         })
     }
     /// Exposure-only viewport, with the same [-5, 5] EV contract as EditState.

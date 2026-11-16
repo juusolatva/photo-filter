@@ -1,4 +1,5 @@
 use crate::export::{ExportFormat, ExportJob, ExportResult};
+use crate::histogram_ui::HistogramUi;
 use crate::preset_ui::{Action as PresetAction, PresetUi};
 use crate::preview::{PreviewCallback, RegionPreview, needs_regions, pixel_aligned};
 use crate::resize::ExportResize;
@@ -54,6 +55,7 @@ pub struct PhotoApp {
     texture: Option<SourceTexture>,
     preview_frame: Option<ExposureFrame>,
     preview_updates: ExposureUpdates,
+    histogram: HistogramUi,
     regions: RegionPreview,
     proxy_scale: f32,
     load_tx: mpsc::Sender<(u64, PathBuf)>,
@@ -122,6 +124,7 @@ impl PhotoApp {
             texture: None,
             preview_frame: None,
             preview_updates: ExposureUpdates::new(&rs.device, &rs.queue),
+            histogram: HistogramUi::new(&rs.device),
             regions,
             proxy_scale: 1.0,
             load_tx,
@@ -344,6 +347,7 @@ impl eframe::App for PhotoApp {
             match result {
                 Ok((source, proxy)) => {
                     self.regions.reset();
+                    self.histogram.reset();
                     self.preview_frame = None;
                     self.proxy_scale = (proxy.width() as f32 / source.buffer.width() as f32)
                         .min(proxy.height() as f32 / source.buffer.height() as f32);
@@ -425,6 +429,13 @@ impl eframe::App for PhotoApp {
             .default_size(220.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    let histogram_rect = ui
+                        .allocate_exact_size(
+                            egui::vec2(ui.available_width(), HistogramUi::HEIGHT),
+                            egui::Sense::hover(),
+                        )
+                        .0;
+                    ui.separator();
                     ui.heading("Basic adjustments");
                     ui.add_enabled_ui(self.source.is_some(), |ui| {
                         adjustments_changed |= ui
@@ -620,6 +631,13 @@ impl eframe::App for PhotoApp {
                     if !self.export_status.is_empty() {
                         ui.label(&self.export_status);
                     }
+                    self.histogram.refresh(
+                        &rs.device,
+                        &rs.queue,
+                        self.texture.as_ref(),
+                        self.adjustments.as_ref().ok(),
+                    );
+                    self.histogram.show(ui, histogram_rect);
                 });
             });
         egui::CentralPanel::default().show(ui, |ui| {
@@ -732,6 +750,9 @@ impl eframe::App for PhotoApp {
         let _ = rs.device.poll(wgpu::PollType::Poll);
         if self.loading || self.export.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.histogram.is_pending() {
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
 }
