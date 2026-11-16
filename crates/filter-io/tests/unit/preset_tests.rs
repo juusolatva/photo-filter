@@ -1,5 +1,7 @@
-use super::{File, MAX_PRESET_BYTES, Path, Preset, read, write};
+use super::{File, MAX_PRESET_BYTES, Preset, read, write};
 use filter_core::{edit::EditState, preset::Sections};
+#[cfg(unix)]
+use std::path::Path;
 
 #[test]
 fn partial_preset_round_trip_and_atomic_replacement() {
