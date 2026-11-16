@@ -49,7 +49,7 @@ impl ExposureRenderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -109,12 +109,68 @@ impl ExposureRenderer {
         queue: &wgpu::Queue,
         image: &ImageBuffer,
     ) -> SourceTexture {
-        assert!(image.width().max(image.height()) <= device.limits().max_texture_dimension_2d);
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("linear Rec.2020 proxy"),
-            size: wgpu::Extent3d {
+        self.upload_region(
+            device,
+            queue,
+            image,
+            Tile {
+                x: 0,
+                y: 0,
                 width: image.width(),
                 height: image.height(),
+            },
+        )
+        .expect("valid viewport texture")
+    }
+    /// Upload a bounded source region, premultiplying before bilinear sampling.
+    /// Callers can include a one-pixel border for seamless adjacent tiles.
+    pub fn upload_region(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &ImageBuffer,
+        region: Tile,
+    ) -> anyhow::Result<SourceTexture> {
+        anyhow::ensure!(
+            region.width > 0
+                && region.height > 0
+                && region
+                    .x
+                    .checked_add(region.width)
+                    .is_some_and(|x| x <= image.width())
+                && region
+                    .y
+                    .checked_add(region.height)
+                    .is_some_and(|y| y <= image.height()),
+            "Viewport region lies outside the source image"
+        );
+        anyhow::ensure!(
+            region.width.max(region.height) <= device.limits().max_texture_dimension_2d,
+            "Viewport region exceeds granted texture limits"
+        );
+        let mut data = Vec::new();
+        data.try_reserve_exact(region.width as usize * region.height as usize)?;
+        for y in region.y..region.y + region.height {
+            let start = y as usize * image.width() as usize + region.x as usize;
+            data.extend(
+                image.pixels()[start..start + region.width as usize]
+                    .iter()
+                    .map(|p| {
+                        let a = p[3].to_f32();
+                        [
+                            half::f16::from_f32(p[0].to_f32() * a),
+                            half::f16::from_f32(p[1].to_f32() * a),
+                            half::f16::from_f32(p[2].to_f32() * a),
+                            p[3],
+                        ]
+                    }),
+            );
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("linear Rec.2020 viewport source"),
+            size: wgpu::Extent3d {
+                width: region.width,
+                height: region.height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -124,33 +180,19 @@ impl ExposureRenderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        // Premultiply only the sampled texture to make interpolation alpha-correct.
-        let data: Vec<[half::f16; 4]> = image
-            .pixels()
-            .iter()
-            .map(|p| {
-                let a = p[3].to_f32();
-                [
-                    half::f16::from_f32(p[0].to_f32() * a),
-                    half::f16::from_f32(p[1].to_f32() * a),
-                    half::f16::from_f32(p[2].to_f32() * a),
-                    p[3],
-                ]
-            })
-            .collect();
         queue.write_texture(
             texture.as_image_copy(),
             bytemuck::cast_slice(&data),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(image.width() * 8),
-                rows_per_image: Some(image.height()),
+                bytes_per_row: Some(region.width * 8),
+                rows_per_image: Some(region.height),
             },
             texture.size(),
         );
-        SourceTexture {
+        Ok(SourceTexture {
             view: texture.create_view(&Default::default()),
-        }
+        })
     }
     /// Exposure-only viewport, with the same [-5, 5] EV contract as EditState.
     ///
@@ -186,9 +228,22 @@ impl ExposureRenderer {
         adjustments: &BasicAdjustments,
         uv: [f32; 4],
     ) -> ExposureFrame {
+        self.frame_region_placed(device, source, adjustments, uv, [0.0, 0.0, 1.0, 1.0])
+    }
+    /// Draw into a normalized subrectangle of the viewport (top-left origin).
+    /// UVs refer to the uploaded texture, including any filtering border.
+    pub fn frame_region_placed(
+        &self,
+        device: &wgpu::Device,
+        source: &SourceTexture,
+        adjustments: &BasicAdjustments,
+        uv: [f32; 4],
+        rect: [f32; 4],
+    ) -> ExposureFrame {
         let mut params = adjustments.uniform_rows().to_vec();
         params.push([if self.target_is_srgb { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0]);
         params.push(uv);
+        params.push(rect);
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("exposure parameters"),
             contents: bytemuck::cast_slice(&params),
@@ -217,6 +272,6 @@ impl ExposureRenderer {
     pub fn paint(&self, pass: &mut wgpu::RenderPass<'_>, frame: &ExposureFrame) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &frame.bind_group, &[]);
-        pass.draw(0..3, 0..1);
+        pass.draw(0..6, 0..1);
     }
 }

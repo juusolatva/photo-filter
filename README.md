@@ -9,7 +9,17 @@ cargo run -p filter-app -- path/to/photo.jpg
 cargo run -p filter-app -- --software-gpu path/to/photo.png
 ```
 
-Use **Open image**, **Ctrl+O**, or drag a file onto the window. Drag to pan, scroll to zoom, and select **Fit** to reset the view. Exposure ranges from −5 to +5 EV. Relative temperature/tint, brightness, contrast, highlights/shadows, whites/blacks, vibrance and saturation range from −1 to +1. All edits leave the source untouched; **Reset adjustments** returns these controls to neutral while preserving other edit sections. Zoom currently samples the proxy; true full-resolution regions arrive in Phase 2.
+Use **Open image**, **Ctrl+O**, or drag a file onto the window. Drag to pan, scroll to zoom, and select **Fit** to reset the view. **100%** shows one source pixel per physical display pixel, with pixel-aligned panning; this scale survives window resizing and display scaling changes until you scroll or select Fit. Exposure ranges from −5 to +5 EV. Relative temperature/tint, brightness, contrast, highlights/shadows, whites/blacks, vibrance and saturation range from −1 to +1. All edits leave the source untouched; **Reset adjustments** returns these controls to neutral while preserving other edit sections.
+
+Above the proxy's native display scale, visible regions progressively refine with
+full-resolution source tiles. A background worker uploads one tile at a time on the
+viewer's GPU device, while the proxy fills areas awaiting refinement. The cache holds
+at most 63 source tiles of up to 512 × 512 pixels, with one-pixel filtering borders,
+within a 128 MiB texture-payload budget (excluding driver overhead and in-flight work).
+Very large visible source regions refine a central subset and retain the proxy elsewhere.
+Tiles survive panning and adjustment changes; each draw uses the current basic settings,
+and results from a previous image are discarded. No full-image GPU texture or region
+readback is required. Spatial filtering, GPU histogram and cursor probe remain pending.
 
 Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
 
@@ -81,6 +91,13 @@ caches are saved only from `main`, and newer runs cancel superseded runs on the 
 These headless checks do not exercise native window interaction or file dialogs.
 
 GPU tests check both sRGB viewport paths and alpha compositing, CPU/GPU parity across all basic controls, tiled-vs-untiled output, straight alpha, HDR/negative working values, and unaligned edge tiles. An additional app test checks PNG, JPEG, WebP and TIFF output against a captured basic-adjustment snapshot. The large export test processes a 6101 × 6001 image (36,612,101 pixels) with a granted 2048px texture limit and 256 MiB buffer limit, then checks every decoded 8/16-bit PNG/TIFF, lossless WebP and JPEG pixel (with a lossy tolerance for JPEG), plus a 257 × 253 streamed reduction. Both source dimensions exceed the texture limit, and a full-image readback would exceed the buffer limit. Ordinary workspace tests cover tile planning, output depth/profile/alpha, EXIF preservation and export/reload across all eight orientations for PNG/JPEG/WebP sources in both byte orders, PNG/TIFF bit depth, PNG/WebP/TIFF straight alpha and seeded dithering, JPEG quality and linear-light flattening, area-resize dimensions/color/alpha/band invariance, stream errors, and failure-safe file publication/cancellation. The app/export path polls without blocking. GPU parity and viewport test harnesses use bounded blocking polls for deterministic readback.
+
+The region-preview software-GPU test compares cached tiles against untiled rendering
+at native and fractional scales, including alpha, clipped regions and filtering seams
+on both sRGB viewport paths. It also covers stale image uploads, adjustment changes,
+cache reuse and eviction. Ordinary tests cover fractional tile coverage, memory bounds
+and physical-pixel alignment at several display scales. Native Linux/Windows interaction
+and refinement latency still require desktop validation.
 
 Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Rendering of curves, detail, grading and custom nodes remains pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
 

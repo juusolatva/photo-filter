@@ -1,12 +1,13 @@
-struct Params { basic: BasicParams, output: vec4<f32>, uv_rect: vec4<f32> }
+struct Params { basic: BasicParams, output: vec4<f32>, uv_rect: vec4<f32>, rect: vec4<f32> }
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
 @group(0) @binding(2) var<uniform> params: Params;
 struct VertexOut { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> }
 @vertex fn vs_main(@builtin(vertex_index) i: u32) -> VertexOut {
-    var positions = array<vec2<f32>,3>(vec2(-1.0,-1.0),vec2(3.0,-1.0),vec2(-1.0,3.0));
-    let p = positions[i];
-    return VertexOut(vec4(p,0.0,1.0),vec2((p.x+1.0)*0.5,(1.0-p.y)*0.5));
+    var uvs = array<vec2<f32>,6>(vec2(0.0,0.0),vec2(0.0,1.0),vec2(1.0,0.0),vec2(1.0,0.0),vec2(0.0,1.0),vec2(1.0,1.0));
+    let uv = uvs[i];
+    let p = params.rect.xy + uv * params.rect.zw;
+    return VertexOut(vec4(p.x*2.0-1.0,1.0-p.y*2.0,0.0,1.0),uv);
 }
 fn encode(c:vec3<f32>) -> vec3<f32> {
     return select(1.055*pow(max(c,vec3(0.0)),vec3(1.0/2.4))-0.055,12.92*c,c<=vec3(0.0031308));
