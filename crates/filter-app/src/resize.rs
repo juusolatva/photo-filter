@@ -39,7 +39,7 @@ impl ExportResize {
     }
 }
 
-/// Consumes full-width rendered bands and emits one reduced row at a time.
+/// Consumes nonempty full-width rendered bands and emits one reduced row at a time.
 /// Keeps one input band, two f64 output-width rows and one f16 output row.
 /// Integer footprint boundaries make overlap weights independent of band/tile edges.
 pub struct ResizeBands<'a, I> {
@@ -101,7 +101,7 @@ impl<'a, I: Iterator<Item = Result<Vec<Pixel>>>> ResizeBands<'a, I> {
             return Ok(());
         }
         ensure!(y == self.source_y, "Out-of-order resize source row");
-        while self.offset == self.band.len() {
+        if self.offset == self.band.len() {
             check_cancel(self.cancel)?;
             // Release the consumed band before requesting another GPU row band.
             self.band = Vec::new();
@@ -111,7 +111,8 @@ impl<'a, I: Iterator<Item = Result<Vec<Pixel>>>> ResizeBands<'a, I> {
                 .next()
                 .context("Too few resize source pixels")??;
             ensure!(
-                self.band.len().is_multiple_of(self.source.0 as usize)
+                !self.band.is_empty()
+                    && self.band.len().is_multiple_of(self.source.0 as usize)
                     && self.band.len() / self.source.0 as usize
                         <= (self.source.1 - self.source_y) as usize,
                 "Invalid resize source band length"
@@ -209,10 +210,10 @@ impl<I: Iterator<Item = Result<Vec<Pixel>>>> Iterator for ResizeBands<'_, I> {
             let finish = (|| {
                 check_cancel(self.cancel)?;
                 ensure!(self.source_y == self.source.1, "Too few resize source rows");
-                for band in self.bands.by_ref() {
-                    check_cancel(self.cancel)?;
-                    ensure!(band?.is_empty(), "Too many resize source pixels");
-                }
+                ensure!(
+                    self.bands.next().transpose()?.is_none(),
+                    "Unexpected resize source band after final row"
+                );
                 Ok(())
             })();
             return finish.err().map(Err);
@@ -389,10 +390,60 @@ mod tests {
     }
 
     #[test]
+    fn empty_bands_fail_immediately_before_between_and_after_source_rows() {
+        use std::cell::Cell;
+
+        let cancel = AtomicBool::new(false);
+        // Keep yielding empties after the selected position, then panic if the
+        // resizer asks for another one. This catches a refill or finalization spin
+        // without hanging the test.
+        for nonempty_bands in 0..=2 {
+            let calls = Cell::new(0);
+            let bands = std::iter::from_fn(|| {
+                let index = calls.get();
+                calls.set(index + 1);
+                assert!(
+                    index <= nonempty_bands,
+                    "requested another band after an empty band"
+                );
+                Some(Ok(if index < nonempty_bands {
+                    vec![[f16::ONE; 4]; 4]
+                } else {
+                    Vec::new()
+                }))
+            });
+            let mut resize = ResizeBands::new(bands, (2, 4), (1, 2), &cancel).unwrap();
+            for _ in 0..nonempty_bands {
+                assert!(resize.next().unwrap().is_ok());
+            }
+            let error = resize.next().unwrap().unwrap_err();
+            assert!(error.to_string().contains(if nonempty_bands == 2 {
+                "Unexpected resize source band"
+            } else {
+                "Invalid resize source band length"
+            }));
+            assert_eq!(calls.get(), nonempty_bands + 1);
+            assert!(resize.next().is_none());
+            assert_eq!(
+                calls.get(),
+                nonempty_bands + 1,
+                "a failed stream must stop consuming bands"
+            );
+        }
+    }
+
+    #[test]
     fn invalid_streams_limits_producer_errors_and_cancellation_fail() {
         let cancel = AtomicBool::new(false);
         for bands in [
             vec![],
+            vec![Ok(Vec::new()), Ok(vec![[f16::ONE; 4]; 8])],
+            vec![
+                Ok(vec![[f16::ONE; 4]; 4]),
+                Ok(Vec::new()),
+                Ok(vec![[f16::ONE; 4]; 4]),
+            ],
+            vec![Ok(vec![[f16::ONE; 4]; 8]), Ok(Vec::new())],
             vec![Ok(vec![[f16::ONE; 4]; 3])],
             vec![Ok(vec![[f16::ONE; 4]; 16])],
             vec![Ok(vec![[f16::ONE; 4]; 4])],

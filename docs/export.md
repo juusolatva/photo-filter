@@ -46,7 +46,9 @@ input band and format-specific encoder buffers. It never allocates a full resize
 working image. Every source tile is still rendered; reducing output dimensions reduces
 encoder memory, not source rendering work. Cancellation is checked at most every
 4096 horizontal sample contributions, during vertical accumulation/output conversion,
-and when requesting bands. Invalid source streams and late producer failures abort
+and when requesting bands. Source bands must be nonempty full-width rows; an empty
+band before, between, or after the source rows fails immediately. Invalid source
+streams and late producer failures abort
 publication in all formats. Pixel-scale filters are not implemented yet; their future
 execution must respect output-pixel dimensions as specified in the plan.
 

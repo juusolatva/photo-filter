@@ -655,7 +655,7 @@ mod tests {
                 ..Default::default()
             }),
         ] {
-            for failure in 0..4 {
+            for failure in 0..7 {
                 let path = directory
                     .path()
                     .join(format!("resized.{}", format.extension()));
@@ -665,6 +665,7 @@ mod tests {
                 let bands = std::iter::from_fn(|| {
                     index += 1;
                     match index {
+                        1 if failure == 5 => Some(Ok(Vec::new())),
                         1 => Some(Ok(vec![[half::f16::ONE; 4]; 8])),
                         2 if failure == 0 => Some(Err(anyhow::anyhow!("render failed"))),
                         2 if failure == 1 => None,
@@ -672,8 +673,10 @@ mod tests {
                             cancel.store(true, Ordering::Relaxed);
                             Some(Ok(vec![[half::f16::ONE; 4]; 8]))
                         }
+                        2 if failure == 4 => Some(Ok(Vec::new())),
                         2 => Some(Ok(vec![[half::f16::ONE; 4]; 8])),
                         3 if failure == 3 => Some(Err(anyhow::anyhow!("late render failure"))),
+                        3 if failure == 6 => Some(Ok(Vec::new())),
                         _ => None,
                     }
                 });
