@@ -154,5 +154,5 @@ pub fn relative_white_balance(temperature: f32, tint: f32) -> Matrix3 {
     product(XYZ_REC2020, product(inverse, product(scaled, REC2020_XYZ)))
 }
 #[cfg(test)]
-#[path = "color_tests.rs"]
+#[path = "../tests/unit/color_tests.rs"]
 mod tests;

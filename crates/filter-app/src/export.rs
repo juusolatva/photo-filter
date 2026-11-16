@@ -379,5 +379,5 @@ impl<W: Write> Write for CancelWriter<'_, W> {
 }
 
 #[cfg(test)]
-#[path = "export_tests.rs"]
+#[path = "../tests/unit/export_tests.rs"]
 mod tests;

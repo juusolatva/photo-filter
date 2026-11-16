@@ -1,4 +1,4 @@
-use super::*;
+use super::{BasicAdjustments, Histogram, HistogramState, HistogramUi, egui};
 fn histogram(n: u32) -> Histogram {
     Histogram {
         transparent: n,

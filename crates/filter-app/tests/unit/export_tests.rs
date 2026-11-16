@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    AtomicBool, AtomicU64, BasicAdjustments, CancelWriter, ExportFormat, ExportResize, Instant,
+    JpegOptions, Ordering, PngBitDepth, PngOptions, ResizeBands, Seek, TiffBitDepth, TiffOptions,
+    TilePlan, WebPOptions, export_image, publish_export,
+};
 use std::io::Write;
 
 #[test]

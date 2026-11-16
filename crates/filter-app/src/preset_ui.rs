@@ -220,5 +220,5 @@ fn capture(
 }
 
 #[cfg(test)]
-#[path = "preset_ui_tests.rs"]
+#[path = "../tests/unit/preset_ui_tests.rs"]
 mod tests;

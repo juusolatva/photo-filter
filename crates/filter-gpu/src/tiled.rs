@@ -305,5 +305,5 @@ impl PendingTile {
 }
 
 #[cfg(test)]
-#[path = "tiled_tests.rs"]
+#[path = "../tests/unit/tiled_tests.rs"]
 mod tests;

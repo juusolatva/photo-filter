@@ -80,5 +80,5 @@ impl ImageBuffer {
     }
 }
 #[cfg(test)]
-#[path = "buffer_tests.rs"]
+#[path = "../tests/unit/buffer_tests.rs"]
 mod tests;

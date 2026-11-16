@@ -146,5 +146,5 @@ fn convert_to_working(rgba: &[f32], source: &ColorProfile) -> Result<Vec<[f16; 4
 }
 
 #[cfg(test)]
-#[path = "lib_tests.rs"]
+#[path = "../tests/unit/lib_tests.rs"]
 mod tests;

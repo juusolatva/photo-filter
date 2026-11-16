@@ -139,5 +139,5 @@ impl Histogram {
 }
 
 #[cfg(test)]
-#[path = "histogram_tests.rs"]
+#[path = "../tests/unit/histogram_tests.rs"]
 mod tests;

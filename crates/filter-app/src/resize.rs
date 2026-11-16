@@ -231,5 +231,5 @@ fn check_cancel(cancel: &AtomicBool) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "resize_tests.rs"]
+#[path = "../tests/unit/resize_tests.rs"]
 mod tests;

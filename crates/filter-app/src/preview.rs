@@ -311,5 +311,5 @@ fn visible_tiles(width: u32, height: u32, visible: egui::Rect, edge: u32) -> Vec
 }
 
 #[cfg(test)]
-#[path = "preview_tests.rs"]
+#[path = "../tests/unit/preview_tests.rs"]
 mod tests;

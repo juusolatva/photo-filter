@@ -1,4 +1,4 @@
-use super::*;
+use super::{BAND_BUDGET, TilePlan, padded_stride};
 #[test]
 fn plan_covers_edges_and_obeys_limits() {
     let limits = wgpu::Limits {

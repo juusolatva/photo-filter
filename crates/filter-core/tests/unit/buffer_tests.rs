@@ -1,4 +1,4 @@
-use super::*;
+use super::{ImageBuffer, f16};
 #[test]
 fn validates_shape() {
     assert!(ImageBuffer::new(0, 1, vec![]).is_err());

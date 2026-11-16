@@ -109,5 +109,5 @@ pub fn write(path: &Path, preset: &Preset) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "preset_tests.rs"]
+#[path = "../tests/unit/preset_tests.rs"]
 mod tests;

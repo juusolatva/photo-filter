@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    BINS, BasicAdjustments, CHANNELS, Histogram, ImageBuffer, LOW_PIXELS_OFFSET, SAMPLED_OFFSET,
+    WORDS, f16,
+};
 #[test]
 fn output_bins_luminance_and_channel_clipping_have_distinct_meanings() {
     let mut histogram = Histogram::default();

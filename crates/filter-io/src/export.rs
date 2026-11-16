@@ -570,5 +570,5 @@ pub fn write_srgb_png_cancellable(
 }
 
 #[cfg(test)]
-#[path = "export_tests.rs"]
+#[path = "../tests/unit/export_tests.rs"]
 mod tests;

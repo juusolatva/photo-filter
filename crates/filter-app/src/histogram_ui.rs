@@ -271,5 +271,5 @@ impl HistogramUi {
 }
 
 #[cfg(test)]
-#[path = "histogram_ui_tests.rs"]
+#[path = "../tests/unit/histogram_ui_tests.rs"]
 mod tests;

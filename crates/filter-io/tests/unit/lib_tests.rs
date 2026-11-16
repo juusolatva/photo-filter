@@ -1,4 +1,4 @@
-use super::*;
+use super::{ColorProfile, MAX_METADATA_BYTES, Orientation, convert_to_working, decode, f16};
 #[test]
 fn small_tiff_retains_wide_gamut_icc_before_applying_pixel_limits() {
     use image::ImageEncoder;

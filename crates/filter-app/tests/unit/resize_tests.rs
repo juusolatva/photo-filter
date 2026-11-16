@@ -1,4 +1,4 @@
-use super::*;
+use super::{AtomicBool, ExportResize, Ordering, Pixel, ResizeBands, Result, f16};
 
 #[test]
 fn dimensions_round_preserve_thin_images_and_never_enlarge() {

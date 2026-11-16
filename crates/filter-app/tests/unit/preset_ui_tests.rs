@@ -1,4 +1,6 @@
-use super::*;
+use super::{
+    BasicAdjustments, EditState, Preset, PresetUi, Sections, available, capture, prepare_apply,
+};
 
 #[test]
 fn superseded_load_reports_cancellation_without_staging_the_result() {
@@ -59,7 +61,7 @@ fn unsupported_selection_is_transactional_and_can_be_deselected() {
 #[test]
 fn merge_failures_do_not_advise_deselecting_unsupported_effects() {
     let mut preset = Preset::from_json(include_str!(
-        "../../filter-core/tests/fixtures/v1-future-node.pfpreset.json"
+        "../../../filter-core/tests/fixtures/v1-future-node.pfpreset.json"
     ))
     .unwrap();
     let node = preset.patch.custom_stack.as_ref().unwrap()[0].clone();
@@ -76,7 +78,7 @@ fn merge_failures_do_not_advise_deselecting_unsupported_effects() {
 
 #[test]
 fn unknown_operations_and_metadata_survive_app_apply_capture_and_disk() {
-    let json = include_str!("../../filter-core/tests/fixtures/v1-future-node.pfpreset.json");
+    let json = include_str!("../../../filter-core/tests/fixtures/v1-future-node.pfpreset.json");
     let mut preset = Preset::from_json(json).unwrap();
     preset.author = "Camera club".into();
     preset.tags = vec!["shared".into(), "future".into()];

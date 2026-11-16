@@ -1,4 +1,4 @@
-use super::*;
+use super::{linear_to_srgb, srgb_to_linear};
 #[test]
 fn transfer_preserves_extended_range() {
     for x in [-2.0, -0.1, 0.0, 0.001, 0.5, 1.0, 4.0] {
