@@ -49,7 +49,7 @@ impl ExportFormat {
     fn validate_path(self, path: &std::path::Path) -> Result<()> {
         let extension = path
             .extension()
-            .and_then(|ext| ext.to_str())
+            .and_then(std::ffi::OsStr::to_str)
             .unwrap_or_default();
         let valid = match self {
             Self::Png(_) => extension.eq_ignore_ascii_case("png"),
