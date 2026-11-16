@@ -83,3 +83,73 @@ jobs:
 
       - name: Run large-image export regression
         run: cargo test -p filter-app --locked large_image_exports -- --ignored --test-threads=1 --nocapture
+
+  # cargo-llvm-cov builds and runs the ordinary tests for coverage. The matrix
+  # above also runs the ignored software-GPU and large-image regressions.
+  sonarqube:
+    name: SonarQube
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Fork and Dependabot PRs have no repository secrets; still run coverage.
+      SONAR_ANALYSIS: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,llvm-tools-preview --no-self-update
+          rustup default stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            pkg-config libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev \
+            libxi-dev libxcursor-dev libxinerama-dev libegl1-mesa-dev libvulkan1
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-llvm-cov@0.9.1
+          fallback: none
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+
+      - name: Get the week for the SonarQube cache key
+        id: week
+        if: env.SONAR_ANALYSIS == 'true'
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      # Rotate weekly without restore-keys so cached plugins/JRE are refreshed.
+      # Only main saves caches; PRs can reuse its matching weekly entry.
+      - name: Restore SonarQube packages
+        id: sonar-cache
+        if: env.SONAR_ANALYSIS == 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-${{ runner.arch }}-sonar-${{ steps.week.outputs.week }}
+
+      - name: SonarQube Scan
+        if: env.SONAR_ANALYSIS == 'true'
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Save SonarQube packages
+        if: env.SONAR_ANALYSIS == 'true' && github.ref == 'refs/heads/main' && steps.sonar-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-${{ runner.arch }}-sonar-${{ steps.week.outputs.week }}
