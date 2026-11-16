@@ -43,6 +43,7 @@ enum ExportKind {
     Png,
     Jpeg,
     WebP,
+    Tiff,
 }
 
 pub struct PhotoApp {
@@ -68,6 +69,7 @@ pub struct PhotoApp {
     jpeg_options: filter_io::JpegOptions,
     png_options: filter_io::PngOptions,
     webp_options: filter_io::WebPOptions,
+    tiff_options: filter_io::TiffOptions,
 }
 impl PhotoApp {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
@@ -123,6 +125,7 @@ impl PhotoApp {
             jpeg_options: filter_io::JpegOptions::default(),
             png_options: filter_io::PngOptions::default(),
             webp_options: filter_io::WebPOptions::default(),
+            tiff_options: filter_io::TiffOptions::default(),
         };
         if let Some(path) = path {
             app.open(path);
@@ -229,6 +232,7 @@ impl PhotoApp {
             ExportKind::Jpeg => ExportFormat::Jpeg(self.jpeg_options),
             ExportKind::Png => ExportFormat::Png(self.png_options),
             ExportKind::WebP => ExportFormat::WebP(self.webp_options),
+            ExportKind::Tiff => ExportFormat::Tiff(self.tiff_options),
         };
         self.dialog_open = true;
         let tx = self.dialog_tx.clone();
@@ -238,6 +242,7 @@ impl PhotoApp {
                 ExportFormat::Png(_) => &["png"],
                 ExportFormat::Jpeg(_) => &["jpg", "jpeg"],
                 ExportFormat::WebP(_) => &["webp"],
+                ExportFormat::Tiff(_) => &["tif", "tiff"],
             };
             let path = rfd::FileDialog::new()
                 .add_filter(format.label(), extensions)
@@ -422,11 +427,12 @@ impl eframe::App for PhotoApp {
                         }
                     }
                     ui.separator();
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Format");
                         ui.selectable_value(&mut self.export_kind, ExportKind::Png, "PNG");
                         ui.selectable_value(&mut self.export_kind, ExportKind::Jpeg, "JPEG");
                         ui.selectable_value(&mut self.export_kind, ExportKind::WebP, "WebP");
+                        ui.selectable_value(&mut self.export_kind, ExportKind::Tiff, "TIFF");
                     });
                     if self.export_kind == ExportKind::Jpeg {
                         ui.add(
@@ -448,6 +454,28 @@ impl eframe::App for PhotoApp {
                             self.webp_options.dither_seed = dither.then_some(0);
                         }
                         ui.label("Full resolution · lossless 8-bit sRGB · preserves alpha");
+                    } else if self.export_kind == ExportKind::Tiff {
+                        ui.horizontal(|ui| {
+                            ui.label("Bit depth");
+                            ui.selectable_value(
+                                &mut self.tiff_options.bit_depth,
+                                filter_io::TiffBitDepth::Eight,
+                                "8-bit",
+                            );
+                            ui.selectable_value(
+                                &mut self.tiff_options.bit_depth,
+                                filter_io::TiffBitDepth::Sixteen,
+                                "16-bit",
+                            );
+                        });
+                        if self.tiff_options.bit_depth == filter_io::TiffBitDepth::Eight {
+                            let mut dither = self.tiff_options.dither_seed.is_some();
+                            if ui.checkbox(&mut dither, "Dither 8-bit output").changed() {
+                                self.tiff_options.dither_seed = dither.then_some(0);
+                            }
+                        }
+                        ui.label("Full resolution · sRGB · preserves alpha");
+                        ui.label("Uncompressed · camera metadata omitted");
                     } else {
                         ui.horizontal(|ui| {
                             ui.label("Bit depth");

@@ -2,7 +2,7 @@
 
 The desktop app renders Exposure, relative Temperature/Tint, Brightness, Contrast,
 Highlights/Shadows, Whites/Blacks, Vibrance and Saturation. The controls leave the
-source untouched and feed both the proxy viewport and full-resolution PNG/JPEG export.
+source untouched and feed both the proxy viewport and full-resolution PNG/JPEG/WebP/TIFF export.
 The export captures the source and adjustments when its save dialog opens.
 Snapshots are rebuilt only when edits change. Unsupported or invalid edits show
 a diagnostic and disable export without panicking or showing a stale preview.
@@ -113,7 +113,7 @@ The viewport unpremultiplies its alpha-weighted source texture before these
 operations, then composites clipped output RGB over its checkerboard. Both
 hardware-sRGB and manually encoded targets are tested. Tiles use straight alpha
 throughout. Output still uses the existing sRGB conversion and clipping; soft
-gamut compression and display dithering remain pending. PNG8, WebP and JPEG export add seeded
+gamut compression and display dithering remain pending. PNG8, TIFF8, WebP and JPEG export add seeded
 8-bit RGB dithering; JPEG also adds linear-light alpha flattening. See
 [the export contract](export.md). Half-float GPU texture storage also limits retained precision and range; this is not an HDR file exporter.
 
@@ -124,5 +124,5 @@ at both endpoints, neutral and mixed settings on near-black, negative/HDR,
 gradient and alpha pixels. They compare f32 shader results at
 `2e-5 * (1 + abs(expected))`, half-float tiles at `0.001 * (1 + abs(expected))`,
 and quantized sRGB at a difference strictly below 2/255. Tiled and untiled output
-must match exactly. Separate viewport and PNG/JPEG/WebP integration tests exercise
+must match exactly. Separate viewport and PNG/JPEG/WebP/TIFF integration tests exercise
 uniform layout, output transfer, alpha and the captured adjustment snapshot.

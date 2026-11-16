@@ -2,22 +2,24 @@
 
 Desktop export renders the captured source and basic adjustments at full resolution.
 Choose PNG for 8-bit or 16-bit sRGB RGBA with straight alpha (default 16-bit),
-JPEG for 8-bit sRGB RGB with quality 1–100 (default 90), or lossless WebP for
-8-bit sRGB RGBA with straight alpha. All embed an output sRGB ICC profile and retain validated
-source EXIF. The chosen format must match the filename: `.png`, `.jpg`/`.jpeg`, or `.webp`,
+JPEG for 8-bit sRGB RGB with quality 1–100 (default 90), lossless WebP for
+8-bit sRGB RGBA with straight alpha, or uncompressed TIFF for 8/16-bit sRGB RGBA
+with straight alpha (default 16-bit). All embed an output sRGB ICC profile.
+PNG/JPEG/WebP retain validated source EXIF; TIFF omits it and explicitly writes Orientation=1.
+The chosen format must match the filename: `.png`, `.jpg`/`.jpeg`, `.webp`, or `.tif`/`.tiff`,
 case insensitive. The native save dialog confirms existing destinations.
 
 JPEG composites straight alpha against a user-selectable sRGB background (default white).
 The background is converted to linear sRGB and composited with the rendered linear RGB
 before output transfer and quantization; a half-transparent black pixel over white is
 about 188/255. Zero-alpha pixels ignore hidden RGB. Colors outside the final
-sRGB gamut are clipped. Eight-bit PNG/WebP RGB and JPEG use seeded triangular dithering
+sRGB gamut are clipped. Eight-bit PNG/WebP/TIFF RGB and JPEG use seeded triangular dithering
 (±1 quantization step) by default; each format has a checkbox to disable it. PNG and WebP alpha use nearest rounding
-without dithering, preserving transparency independently of the noise seed. PNG and WebP store
+without dithering, preserving transparency independently of the noise seed. TIFF alpha uses the same rounding. PNG, WebP and TIFF store
 straight color, including hidden RGB at zero alpha, without compositing. Exact 8-bit
 levels (within 0.0001 of a code step for floating-point transform error), including solid backgrounds and clipped black/white,
 are preserved without noise. Noise depends on pixel/channel index and seed,
-so changing tile or band boundaries does not change it. Sixteen-bit PNG always quantizes
+so changing tile, band or TIFF strip boundaries does not change it. Sixteen-bit PNG/TIFF always quantize
 without dithering. Gamut compression and other output color spaces remain pending.
 
 All formats stream GPU tiles into bounded row bands and publish the completed file
@@ -37,7 +39,12 @@ row band, tile buffers and immutable half-float source. This output buffer is ca
 at 512 MiB with fallible allocation. WebP needs an RGBA8 CPU buffer (4 bytes per pixel),
 also capped at 512 MiB with fallible allocation, plus encoder-owned transformed pixels
 and a compressed frame buffer. The cap covers the input RGBA buffer, not total encoder
-or process memory. No format allocates a full-image GPU output texture or readback buffer.
+or process memory. TIFF streams into a fallibly allocated strip buffer targeting 1 MiB
+(or one wider scanline), plus small encoder-owned strip tables. It does not allocate a
+full-image CPU output buffer. TIFF's uncompressed pixel payload is capped at 512 MiB
+(4 bytes/pixel at 8-bit, 8 at 16-bit); this excludes headers, ICC and strip tables and keeps
+classic TIFF offsets below 4 GiB. The app's import pixel budget stays below this cap.
+No format allocates a full-image GPU output texture or readback buffer.
 JPEG dimensions must each be between 1 and 65535; lossless WebP dimensions must each
 be between 1 and 16384. Invalid dimensions and buffer limits fail before requesting bands.
 
@@ -94,6 +101,31 @@ metadata roundtrips and cancellation during conversion and encoding. Software-GP
 compare both PNG depths, WebP and JPEG against captured CPU adjustments, check that different
 tile sizes produce identical PNG8/WebP pixels, and check every output pixel of a >36MP image
 with a 2048px device texture limit (within JPEG's lossy tolerance).
+
+The `write_srgb_tiff` and `write_srgb_tiff_cancellable` APIs accept `TiffOptions`
+(depth, optional dither seed; default 16-bit with `Some(0)` ignored at that depth)
+and the same row-major band layout. They require `Write + Seek` positioned at offset zero.
+The explicit `tiff::encoder::TiffEncoder` writes RGB plus an `UnassociatedAlpha`
+extra sample (`ExtraSamples=2`), the output sRGB ICC, and `Orientation=1`.
+Using the underlying encoder allows bounded strip streaming and an explicit alpha tag.
+Sixteen-bit samples are written in native byte order with the matching TIFF header.
+Both depths share PNG's quantization, including hidden RGB at zero alpha.
+
+TIFF deliberately accepts no EXIF argument: camera tags, timestamps, thumbnails and
+other source EXIF are omitted, including malformed captured EXIF. The format controls
+state this before export. XMP is also omitted. Cancellation checks conversion every
+4096 pixels, strip writes and finalization; the app checks writes, seeks and publication.
+Under/overlength bands, producer failures, write/seek/finalization/flush errors and
+cancellation propagate without publishing the temporary file. TIFF metadata is read
+before applying `image`'s pixel decoding limits on import, avoiding silent ICC loss
+for small images whose profile is larger than the pixel buffer.
+
+TIFF tests check exact PNG parity at both depths across seeds/bands/strips, partial
+final strips, scanlines wider than the strip target, hidden color/alpha, clipping and
+non-finite values, tags/ICC, input limits and all I/O failure paths. Oriented PNG/JPEG/WebP
+sources export/reload through TIFF across all eight orientations and both EXIF byte orders.
+Software-GPU tests compare both TIFF depths against PNG at different tile sizes and
+validate every pixel of the 36.6MP fixture with bounded strip/row decoding.
 
 The `write_srgb8_webp` and `write_srgb8_webp_cancellable` APIs accept the same band layout
 and optional raw source EXIF, with `WebPOptions` for an optional dither seed (default `Some(0)`).

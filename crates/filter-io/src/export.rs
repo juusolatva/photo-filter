@@ -3,7 +3,165 @@ use filter_core::color::{linear_to_srgb, rec2020_to_linear_srgb, srgb_to_linear}
 use half::f16;
 use image::ImageEncoder;
 use moxcms::ColorProfile;
-use std::{borrow::Cow, io::Write};
+use std::{
+    borrow::Cow,
+    io::{Seek, Write},
+};
+
+/// TIFF channel depth. Both modes preserve straight alpha.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TiffBitDepth {
+    Eight,
+    #[default]
+    Sixteen,
+}
+
+/// Uncompressed TIFF settings. Dithering affects only 8-bit RGB, never alpha.
+#[derive(Clone, Copy, Debug)]
+pub struct TiffOptions {
+    pub bit_depth: TiffBitDepth,
+    pub dither_seed: Option<u64>,
+}
+
+impl Default for TiffOptions {
+    fn default() -> Self {
+        Self {
+            bit_depth: TiffBitDepth::Sixteen,
+            dither_seed: Some(0),
+        }
+    }
+}
+
+/// Stream oriented straight linear Rec.2020 bands as uncompressed sRGB TIFF.
+/// Embeds output ICC and marks alpha as unassociated. Source EXIF is omitted.
+/// Pixel payload is limited to 512 MiB. Conversion buffers target 1 MiB strips
+/// (or one wider scanline), in addition to the current input band. Sixteen-bit
+/// output is undithered. Caller owns atomic publication; output must be seekable
+/// and positioned at offset zero.
+pub fn write_srgb_tiff(
+    output: impl Write + Seek,
+    width: u32,
+    height: u32,
+    options: TiffOptions,
+    bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
+) -> Result<()> {
+    write_srgb_tiff_cancellable(output, width, height, options, bands, || false)
+}
+
+/// Like [`write_srgb_tiff`], checking cancellation before output, between bands,
+/// at most every 4096 converted pixels, before strip writes and finalization.
+/// Caller must also check output writes/seeks and publication for cancellation.
+pub fn write_srgb_tiff_cancellable(
+    mut output: impl Write + Seek,
+    width: u32,
+    height: u32,
+    options: TiffOptions,
+    bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<()> {
+    ensure!(!is_cancelled(), "Export cancelled");
+    ensure!(width > 0 && height > 0, "Invalid TIFF dimensions");
+    let bytes_per_pixel = match options.bit_depth {
+        TiffBitDepth::Eight => 4_u64,
+        TiffBitDepth::Sixteen => 8,
+    };
+    ensure!(
+        (u64::from(width) * u64::from(height))
+            .checked_mul(bytes_per_pixel)
+            .is_some_and(|bytes| bytes <= 512 * 1024 * 1024),
+        "TIFF pixel payload exceeds the 512 MiB limit"
+    );
+    let rows_per_strip = (1024 * 1024 / (u64::from(width) * bytes_per_pixel))
+        .max(1)
+        .min(u64::from(height)) as u32;
+    ensure!(
+        output.stream_position()? == 0,
+        "TIFF output must start at offset zero"
+    );
+    match options.bit_depth {
+        TiffBitDepth::Eight => write_tiff_strips::<tiff::encoder::colortype::RGB8>(
+            &mut output,
+            (width, height),
+            rows_per_strip,
+            bands,
+            &mut is_cancelled,
+            |pixel, index| straight_srgb8_pixel(pixel, options.dither_seed, index),
+        )?,
+        TiffBitDepth::Sixteen => write_tiff_strips::<tiff::encoder::colortype::RGB16>(
+            &mut output,
+            (width, height),
+            rows_per_strip,
+            bands,
+            &mut is_cancelled,
+            |pixel, _| straight_srgb16_pixel(pixel),
+        )?,
+    }
+    output.flush()?;
+    Ok(())
+}
+
+fn write_tiff_strips<C: tiff::encoder::colortype::ColorType>(
+    output: &mut (impl Write + Seek),
+    (width, height): (u32, u32),
+    rows_per_strip: u32,
+    bands: impl IntoIterator<Item = Result<Vec<[f16; 4]>>>,
+    is_cancelled: &mut impl FnMut() -> bool,
+    convert: impl Fn([f16; 4], u64) -> [C::Inner; 4],
+) -> Result<()>
+where
+    [C::Inner]: tiff::encoder::TiffValue,
+{
+    // RGB + an explicit extra sample avoids ambiguous alpha interpretation.
+    let icc = ColorProfile::new_srgb().encode()?;
+    let mut strip = Vec::new();
+    strip
+        .try_reserve_exact(width as usize * rows_per_strip as usize * 4)
+        .context("Could not allocate TIFF strip buffer")?;
+    let mut encoder = tiff::encoder::TiffEncoder::new(output)?;
+    let mut image = encoder.new_image::<C>(width, height)?;
+    image.extra_samples(&[tiff::tags::ExtraSamples::UnassociatedAlpha])?;
+    image.rows_per_strip(rows_per_strip)?;
+    image
+        .encoder()
+        .write_tag(tiff::tags::Tag::IccProfile, icc.as_slice())?;
+    image
+        .encoder()
+        .write_tag(tiff::tags::Tag::Orientation, 1_u16)?;
+    let count = u64::from(width) * u64::from(height);
+    let mut index = 0;
+    let mut strip_samples = image.next_strip_sample_count();
+    for band in bands {
+        ensure!(!is_cancelled(), "Export cancelled");
+        let band = band?;
+        ensure!(
+            band.len() as u64 <= count - index,
+            "Too many pixels for TIFF dimensions"
+        );
+        for chunk in band.chunks(4096) {
+            ensure!(!is_cancelled(), "Export cancelled");
+            for &pixel in chunk {
+                strip.extend(convert(pixel, index));
+                index += 1;
+                if strip.len() as u64 == strip_samples {
+                    ensure!(!is_cancelled(), "Export cancelled");
+                    image.write_strip(&strip)?;
+                    strip.clear();
+                    strip_samples = image.next_strip_sample_count();
+                }
+            }
+        }
+    }
+    ensure!(index == count, "Not enough pixels for TIFF dimensions");
+    ensure!(!is_cancelled(), "Export cancelled");
+    image.finish()?;
+    Ok(())
+}
+
+fn straight_srgb16_pixel(pixel: [f16; 4]) -> [u16; 4] {
+    let [r, g, b, a] = pixel.map(f16::to_f32);
+    let rgb = rec2020_to_linear_srgb([r, g, b]).map(|c| linear_to_srgb(c).clamp(0.0, 1.0));
+    [rgb[0], rgb[1], rgb[2], a.clamp(0.0, 1.0)].map(|channel| (channel * 65535.0).round() as u16)
+}
 
 /// JPEG options. Background channels are encoded sRGB; compositing uses linear light.
 #[derive(Clone, Copy, Debug)]
@@ -392,14 +550,8 @@ pub fn write_srgb_png_cancellable(
                             ));
                         }
                         PngBitDepth::Sixteen => {
-                            let [r, g, b, a] = pixel.map(f16::to_f32);
-                            let rgb = rec2020_to_linear_srgb([r, g, b])
-                                .map(|c| linear_to_srgb(c).clamp(0.0, 1.0));
-                            let alpha = a.clamp(0.0, 1.0);
-                            for channel in rgb.into_iter().chain([alpha]) {
-                                bytes.extend_from_slice(
-                                    &((channel * 65535.0).round() as u16).to_be_bytes(),
-                                );
+                            for channel in straight_srgb16_pixel(*pixel) {
+                                bytes.extend_from_slice(&channel.to_be_bytes());
                             }
                         }
                     }
@@ -422,6 +574,302 @@ mod tests {
     use super::*;
     use image::ImageDecoder;
     use std::io::Cursor;
+
+    #[test]
+    fn tiff_matches_png_at_both_depths_across_bands_strips_and_seeds() {
+        let (w, h) = (257, 1100);
+        let pixels: Vec<_> = (0..w * h)
+            .map(|i| {
+                let x = (i % w) as f32 / (w - 1) as f32;
+                [
+                    x * 1.4 - 0.2,
+                    x * 0.3,
+                    0.17,
+                    [0.0, 0.25, 0.5, 1.0][i as usize % 4],
+                ]
+                .map(f16::from_f32)
+            })
+            .collect();
+        for bit_depth in [TiffBitDepth::Eight, TiffBitDepth::Sixteen] {
+            let mut first_seed = None;
+            for seed in [None, Some(0), Some(42)] {
+                let mut png = Vec::new();
+                write_srgb_png(
+                    &mut png,
+                    w,
+                    h,
+                    None,
+                    PngOptions {
+                        bit_depth: match bit_depth {
+                            TiffBitDepth::Eight => PngBitDepth::Eight,
+                            TiffBitDepth::Sixteen => PngBitDepth::Sixteen,
+                        },
+                        dither_seed: seed,
+                    },
+                    [Ok(pixels.clone())],
+                )
+                .unwrap();
+                let expected = image::load_from_memory(&png).unwrap();
+                for band_size in [71, pixels.len()] {
+                    let mut output = Cursor::new(Vec::new());
+                    write_srgb_tiff(
+                        &mut output,
+                        w,
+                        h,
+                        TiffOptions {
+                            bit_depth,
+                            dither_seed: seed,
+                        },
+                        pixels.chunks(band_size).map(|p| Ok(p.to_vec())),
+                    )
+                    .unwrap();
+                    let bytes = output.into_inner();
+                    let mut tags = tiff::decoder::Decoder::new(Cursor::new(&bytes)).unwrap();
+                    assert_eq!(
+                        tags.get_tag_u16_vec(tiff::tags::Tag::ExtraSamples).unwrap(),
+                        [2]
+                    );
+                    assert_eq!(tags.get_tag_u32(tiff::tags::Tag::Orientation).unwrap(), 1);
+                    assert_eq!(tags.get_tag_u32(tiff::tags::Tag::Compression).unwrap(), 1);
+                    assert!(
+                        tags.get_tag_u32_vec(tiff::tags::Tag::StripOffsets)
+                            .unwrap()
+                            .len()
+                            > 1
+                    );
+                    let mut decoder =
+                        image::codecs::tiff::TiffDecoder::new(Cursor::new(bytes)).unwrap();
+                    assert_eq!(decoder.dimensions(), (w, h));
+                    let icc = decoder.icc_profile().unwrap().unwrap();
+                    assert_eq!(
+                        ColorProfile::new_from_slice(&icc).unwrap().color_space,
+                        moxcms::DataColorSpace::Rgb
+                    );
+                    assert!(decoder.exif_metadata().unwrap().is_none());
+                    assert_eq!(
+                        decoder.orientation().unwrap(),
+                        image::metadata::Orientation::NoTransforms
+                    );
+                    let actual = image::DynamicImage::from_decoder(decoder).unwrap();
+                    assert_eq!(actual.color(), expected.color());
+                    assert_eq!(
+                        actual.as_bytes(),
+                        expected.as_bytes(),
+                        "{bit_depth:?}, seed {seed:?}, band {band_size}"
+                    );
+                }
+                if let Some(ref first) = first_seed {
+                    match bit_depth {
+                        TiffBitDepth::Eight => assert_ne!(expected.as_bytes(), first),
+                        TiffBitDepth::Sixteen => assert_eq!(expected.as_bytes(), first),
+                    }
+                } else {
+                    first_seed = Some(expected.as_bytes().to_vec());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tiff_preserves_hidden_color_and_alpha_and_clips_nonfinite_samples() {
+        for bit_depth in [TiffBitDepth::Eight, TiffBitDepth::Sixteen] {
+            let pixels: Vec<_> = [
+                [0.25, 0.25, 0.25, 0.0],
+                [0.25, 0.25, 0.25, 0.5],
+                [-1.0, -1.0, -1.0, -1.0],
+                [2.0, 2.0, 2.0, 2.0],
+                [f32::NAN; 4],
+                [f32::INFINITY, 0.0, 0.0, f32::INFINITY],
+            ]
+            .map(|p| p.map(f16::from_f32))
+            .to_vec();
+            let mut output = Cursor::new(Vec::new());
+            write_srgb_tiff(
+                &mut output,
+                6,
+                1,
+                TiffOptions {
+                    bit_depth,
+                    dither_seed: None,
+                },
+                [Ok(pixels)],
+            )
+            .unwrap();
+            let image = image::load_from_memory(output.get_ref()).unwrap();
+            let expected: Vec<u16> = match bit_depth {
+                TiffBitDepth::Eight => [
+                    [137, 137, 137, 0],
+                    [137, 137, 137, 128],
+                    [0; 4],
+                    [255; 4],
+                    [0; 4],
+                    [255, 0, 0, 255],
+                ]
+                .concat()
+                .into_iter()
+                .map(|v| v * 257)
+                .collect(),
+                TiffBitDepth::Sixteen => [
+                    [35199, 35199, 35199, 0],
+                    [35199, 35199, 35199, 32768],
+                    [0; 4],
+                    [65535; 4],
+                    [0; 4],
+                    [65535, 0, 0, 65535],
+                ]
+                .concat(),
+            };
+            let actual = image.into_rgba16();
+            for (a, e) in actual.as_raw().iter().zip(expected) {
+                assert!(a.abs_diff(e) <= 1, "{bit_depth:?}: {a} vs {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn tiff_rejects_invalid_dimensions_limits_and_pixel_streams() {
+        for bit_depth in [TiffBitDepth::Eight, TiffBitDepth::Sixteen] {
+            let options = TiffOptions {
+                bit_depth,
+                ..Default::default()
+            };
+            let mut offset_output = Cursor::new(vec![99]);
+            offset_output.set_position(1);
+            let error =
+                write_srgb_tiff(&mut offset_output, 1, 1, options, [Ok(vec![[f16::ONE; 4]])])
+                    .unwrap_err();
+            assert!(error.to_string().contains("offset zero"));
+            assert_eq!(offset_output.into_inner(), [99]);
+            for (w, h) in [(0, 1), (1, 0), (u32::MAX, u32::MAX), (134217729, 1)] {
+                let mut output = Cursor::new(Vec::new());
+                let bands = std::iter::from_fn(|| -> Option<Result<Vec<[f16; 4]>>> {
+                    panic!("invalid dimensions must fail before requesting pixels")
+                });
+                assert!(write_srgb_tiff(&mut output, w, h, options, bands).is_err());
+                assert!(output.get_ref().is_empty());
+            }
+            for (bands, message) in [
+                (vec![Ok(vec![])], "Not enough pixels"),
+                (vec![Ok(vec![[f16::ONE; 4]; 2])], "Too many pixels"),
+                (
+                    vec![Ok(vec![[f16::ONE; 4]]), Ok(vec![[f16::ONE; 4]])],
+                    "Too many pixels",
+                ),
+                (
+                    vec![Err(anyhow::anyhow!("producer failed"))],
+                    "producer failed",
+                ),
+            ] {
+                let error =
+                    write_srgb_tiff(Cursor::new(Vec::new()), 1, 1, options, bands).unwrap_err();
+                assert!(error.to_string().contains(message), "{error:#}");
+            }
+            // Wider than the target strip: allocate and encode one scanline.
+            let mut output = Cursor::new(Vec::new());
+            write_srgb_tiff(
+                &mut output,
+                262145,
+                1,
+                options,
+                [Ok(vec![[f16::ONE; 4]; 262145])],
+            )
+            .unwrap();
+            let image = image::load_from_memory(output.get_ref())
+                .unwrap()
+                .into_rgba16();
+            assert!(image.as_raw().iter().all(|v| *v == 65535));
+        }
+    }
+
+    #[test]
+    fn tiff_cancellation_interrupts_conversion_and_finalization() {
+        for bit_depth in [TiffBitDepth::Eight, TiffBitDepth::Sixteen] {
+            for cancel_at in [1, 4, 8] {
+                let mut checkpoints = 0;
+                let mut consumed = false;
+                let bands = std::iter::once_with(|| {
+                    consumed = true;
+                    Ok(vec![[f16::ONE; 4]; 256 * 64])
+                });
+                let mut output = Cursor::new(Vec::new());
+                let error = write_srgb_tiff_cancellable(
+                    &mut output,
+                    256,
+                    64,
+                    TiffOptions {
+                        bit_depth,
+                        ..Default::default()
+                    },
+                    bands,
+                    || {
+                        checkpoints += 1;
+                        checkpoints >= cancel_at
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(error.to_string(), "Export cancelled");
+                assert_eq!(checkpoints, cancel_at);
+                if cancel_at == 1 {
+                    assert!(!consumed);
+                    assert!(output.get_ref().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tiff_propagates_write_seek_finalization_and_flush_errors() {
+        struct FailingOutput {
+            inner: Cursor<Vec<u8>>,
+            operation: &'static str,
+        }
+        impl Write for FailingOutput {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.operation == "write"
+                    || (self.operation == "finalization" && self.inner.position() > 1024)
+                {
+                    Err(std::io::Error::other(self.operation))
+                } else {
+                    self.inner.write(bytes)
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.operation == "flush" {
+                    Err(std::io::Error::other("flush"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        impl Seek for FailingOutput {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                if self.operation == "seek" {
+                    Err(std::io::Error::other("seek"))
+                } else {
+                    self.inner.seek(pos)
+                }
+            }
+        }
+        for bit_depth in [TiffBitDepth::Eight, TiffBitDepth::Sixteen] {
+            for operation in ["write", "seek", "finalization", "flush"] {
+                let error = write_srgb_tiff(
+                    FailingOutput {
+                        inner: Cursor::new(Vec::new()),
+                        operation,
+                    },
+                    17,
+                    9,
+                    TiffOptions {
+                        bit_depth,
+                        ..Default::default()
+                    },
+                    [Ok(vec![[f16::ONE; 4]; 17 * 9])],
+                )
+                .unwrap_err();
+                assert!(format!("{error:#}").contains(operation), "{error:#}");
+            }
+        }
+    }
 
     // IFD0 contains an out-of-line camera Make and optionally Orientation.
     // Keeping the Make before Orientation also exercises scanning unrelated tags.
@@ -1320,6 +1768,23 @@ mod tests {
                     assert_eq!(reloaded.exif_bytes.as_deref(), Some(expected.as_slice()));
                     assert_eq!(decoded.exif_bytes.as_deref(), Some(exif.as_slice()));
                     assert!(reloaded.icc_profile.is_some());
+                    let tiff_output = directory.path().join("oriented.tiff");
+                    write_srgb_tiff(
+                        std::fs::File::create(&tiff_output).unwrap(),
+                        decoded.buffer.width(),
+                        decoded.buffer.height(),
+                        TiffOptions::default(),
+                        [Ok(decoded.buffer.pixels().to_vec())],
+                    )
+                    .unwrap();
+                    let tiff_reloaded = crate::decode(&tiff_output).unwrap();
+                    assert_eq!(tiff_reloaded.source_orientation, Orientation::NoTransforms);
+                    assert!(tiff_reloaded.exif_bytes.is_none());
+                    assert!(tiff_reloaded.icc_profile.is_some());
+                    assert_eq!(
+                        image::open(&tiff_output).unwrap().into_rgba16(),
+                        image::open(&output).unwrap().into_rgba16()
+                    );
                     for (actual, expected) in
                         reloaded.buffer.pixels().iter().zip(decoded.buffer.pixels())
                     {
