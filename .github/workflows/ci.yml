@@ -84,8 +84,8 @@ jobs:
       - name: Run large-image export regression
         run: cargo test -p filter-app --locked large_image_exports -- --ignored --test-threads=1 --nocapture
 
-  # cargo-llvm-cov builds and runs the ordinary tests for coverage. The matrix
-  # above also runs the ignored software-GPU and large-image regressions.
+  # cargo-llvm-cov runs the ordinary and ignored software-GPU tests on lavapipe
+  # for coverage. Only the matrix above runs the large-image export regression.
   sonarqube:
     name: SonarQube
     runs-on: ubuntu-latest
