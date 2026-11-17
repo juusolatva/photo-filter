@@ -110,12 +110,18 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install Linux build dependencies
+      - name: Install Linux dependencies and configure lavapipe
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             pkg-config libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev \
-            libxi-dev libxcursor-dev libxinerama-dev libegl1-mesa-dev libvulkan1
+            libxi-dev libxcursor-dev libxinerama-dev libegl1-mesa-dev \
+            libvulkan1 mesa-vulkan-drivers
+          install -d -m 700 "$RUNNER_TEMP/xdg-runtime"
+          echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg-runtime" >> "$GITHUB_ENV"
+          lavapipe_icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          test -f "${lavapipe_icds[0]}"
+          echo "VK_DRIVER_FILES=${lavapipe_icds[0]}" >> "$GITHUB_ENV"
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
@@ -123,8 +129,15 @@ jobs:
           tool: cargo-llvm-cov@0.9.1
           fallback: none
 
+      # Include the software-GPU regressions so GPU code is measured; they fail
+      # rather than skip without lavapipe. The large-image export regression
+      # stays in the test matrix because instrumentation makes it too slow.
       - name: Generate coverage report
-        run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+        env:
+          WGPU_BACKEND: vulkan
+        run: >-
+          cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
+          -- --include-ignored --skip large_image_exports --test-threads=1
 
       - name: Get the week for the SonarQube cache key
         id: week

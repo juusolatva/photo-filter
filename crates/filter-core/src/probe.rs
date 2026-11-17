@@ -38,8 +38,8 @@ impl ProbeSample {
         if !pixel.iter().all(|v| v.is_finite()) {
             return Self::Invalid;
         }
-        let adjusted = settings.pixel(pixel);
-        let rgb = color::rec2020_to_linear_srgb(adjusted[..3].try_into().unwrap());
+        let [r, g, b, _] = settings.pixel(pixel);
+        let rgb = color::rec2020_to_linear_srgb([r, g, b]);
         Self::from_linear_srgb([rgb[0], rgb[1], rgb[2], pixel[3]])
     }
 

@@ -79,12 +79,68 @@ fn rapid_pointer_edits_image_changes_and_leaving_reject_old_results() {
     s.accept(current, Ok(ProbeSample::Transparent));
     assert!(s.display.is_none());
 }
+/// Paint the readout into its reserved panel space and return its text,
+/// checking that every state fits above the following controls.
+fn rendered_text(probe: &mut ProbeUi) -> Vec<String> {
+    let ctx = egui::Context::default();
+    let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            let rect = ui
+                .allocate_exact_size(egui::vec2(220.0, ProbeUi::HEIGHT), egui::Sense::hover())
+                .0;
+            let mut panel = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            let next = ui.label("Basic adjustments").rect;
+            probe.show(&mut panel);
+            assert!(
+                panel.min_rect().bottom() <= rect.bottom(),
+                "readout must fit reserved height"
+            );
+            assert!(
+                panel.min_rect().right() <= rect.right(),
+                "readout must fit panel width"
+            );
+            assert!(
+                panel.min_rect().bottom() < next.top(),
+                "readout must not overlap controls"
+            );
+        });
+    });
+    let text: Vec<_> = output
+        .shapes
+        .iter()
+        .filter_map(|s| {
+            if let egui::Shape::Text(t) = &s.shape {
+                Some(t.galley.text().to_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+    output.drop_without_applying_deltas();
+    text
+}
+fn has(text: &[String], line: &str) -> bool {
+    text.iter().any(|s| s == line)
+}
+#[test]
+fn unavailable_gpu_explains_without_offering_retry() {
+    let mut probe = ProbeUi {
+        gpu: Err("Device limits cannot support the color probe".into()),
+        state: ProbeState::default(),
+    };
+    probe.state.target = Some(([1, 2], *BasicAdjustments::default().uniform_rows()));
+    let text = rendered_text(&mut probe);
+    assert!(has(&text, "Color probe unavailable"));
+    // Retrying cannot recover a device that lacks the required limits.
+    assert!(!has(&text, "Retry color probe"));
+    assert!(!probe.is_pending());
+}
 #[test]
 #[ignore = "requires a Vulkan/DX12/Metal software adapter"]
 fn probe_ui_samples_original_pixels_coalesces_and_paints_reserved_space() {
     use half::f16;
     use std::time::{Duration, Instant};
-    pollster::block_on(async {
+    let (device, queue) = pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY)
                 & wgpu::Backends::PRIMARY,
@@ -98,134 +154,126 @@ fn probe_ui_samples_original_pixels_coalesces_and_paints_reserved_space() {
             .await
             .expect("software adapter required");
         eprintln!("Software GPU: {:?}", adapter.get_info());
-        let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
-        let mut pixels = vec![[f16::ZERO; 4]; 3001];
-        pixels[3000] = [0.125, 0.25, 0.5, 0.25].map(f16::from_f32);
-        let source = ImageBuffer::new(3001, 1, pixels).unwrap();
-        let neutral = BasicAdjustments::default();
-        let bright = BasicAdjustments::exposure(1.0).unwrap();
-        let mut probe = ProbeUi::new(&device);
-        for (pixel, settings) in [
-            ([0, 0], &neutral),
-            ([3000, 0], &bright),
-            ([3000, 0], &neutral),
-        ] {
-            probe.refresh(&device, &queue, Some(&source), Some(settings), Some(pixel));
-        }
-        assert!(probe.is_pending());
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while probe.state.display.is_none() || probe.is_pending() {
-            device.poll(wgpu::PollType::Poll).unwrap();
-            probe.refresh(
-                &device,
-                &queue,
-                Some(&source),
-                Some(&neutral),
-                Some([3000, 0]),
-            );
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let expected = ProbeSample::reference(source.pixels()[3000].map(f16::to_f32), &neutral);
-        let actual = probe.state.display.unwrap();
-        assert_eq!(actual.rgb8(), expected.rgb8());
-        let generation = probe.state.generation;
-        probe.refresh(
-            &device,
-            &queue,
-            Some(&source),
-            Some(&neutral),
-            Some([3000, 0]),
-        );
-        assert_eq!(generation, probe.state.generation);
-        assert!(!probe.is_pending(), "idle cursor must not submit GPU work");
-
-        let ctx = egui::Context::default();
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            egui::CentralPanel::default().show(ui, |ui| {
-                let rect = ui
-                    .allocate_exact_size(egui::vec2(220.0, ProbeUi::HEIGHT), egui::Sense::hover())
-                    .0;
-                let mut panel = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                let next = ui.label("Basic adjustments").rect;
-                probe.show(&mut panel);
-                assert!(
-                    panel.min_rect().bottom() <= rect.bottom(),
-                    "readout must fit reserved height"
-                );
-                assert!(
-                    panel.min_rect().right() <= rect.right(),
-                    "readout must fit panel width"
-                );
-                assert!(
-                    panel.min_rect().bottom() < next.top(),
-                    "readout must not overlap controls"
-                );
-            });
-        });
-        let text: Vec<_> = output
-            .shapes
-            .iter()
-            .filter_map(|s| {
-                if let egui::Shape::Text(t) = &s.shape {
-                    Some(t.galley.text().to_owned())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        output.drop_without_applying_deltas();
-        assert!(text.iter().any(|s| s == "Pixel (3000, 0)"));
-        assert!(
-            text.iter()
-                .any(|s| s.starts_with("RGB ") && s.contains('#'))
-        );
-        assert!(text.iter().any(|s| s.starts_with("Oklab ")));
-        assert!(text.iter().any(|s| s == "Alpha 25.0% · sRGB"));
-
-        // A new image at identical coordinates/settings invalidates old work.
-        probe.refresh(
-            &device,
-            &queue,
-            Some(&source),
-            Some(&bright),
-            Some([3000, 0]),
-        );
-        probe.reset();
-        let replacement = ImageBuffer::new(3001, 1, vec![[f16::ZERO; 4]; 3001]).unwrap();
-        probe.refresh(
-            &device,
-            &queue,
-            Some(&replacement),
-            Some(&neutral),
-            Some([3000, 0]),
-        );
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while probe.state.display.is_none() || probe.is_pending() {
-            device.poll(wgpu::PollType::Poll).unwrap();
-            probe.refresh(
-                &device,
-                &queue,
-                Some(&replacement),
-                Some(&neutral),
-                Some([3000, 0]),
-            );
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert_eq!(probe.state.display, Some(ProbeSample::Transparent));
-        probe.refresh(&device, &queue, Some(&replacement), Some(&neutral), None);
-        assert!(probe.state.display.is_none());
-        assert!(!probe.is_pending());
-        // Unsupported settings and out-of-bounds targets never submit.
-        probe.refresh(&device, &queue, Some(&replacement), None, Some([3000, 0]));
-        probe.refresh(
-            &device,
-            &queue,
-            Some(&replacement),
-            Some(&neutral),
-            Some([3001, 0]),
-        );
-        assert!(probe.state.target.is_none() && !probe.is_pending());
+        adapter.request_device(&Default::default()).await.unwrap()
     });
+    let mut pixels = vec![[f16::ZERO; 4]; 3001];
+    pixels[3000] = [0.125, 0.25, 0.5, 0.25].map(f16::from_f32);
+    let source = ImageBuffer::new(3001, 1, pixels).unwrap();
+    let neutral = BasicAdjustments::default();
+    let bright = BasicAdjustments::exposure(1.0).unwrap();
+    let mut probe = ProbeUi::new(&device);
+    for (pixel, settings) in [
+        ([0, 0], &neutral),
+        ([3000, 0], &bright),
+        ([3000, 0], &neutral),
+    ] {
+        probe.refresh(&device, &queue, Some(&source), Some(settings), Some(pixel));
+    }
+    assert!(probe.is_pending());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while probe.state.display.is_none() || probe.is_pending() {
+        device.poll(wgpu::PollType::Poll).unwrap();
+        probe.refresh(
+            &device,
+            &queue,
+            Some(&source),
+            Some(&neutral),
+            Some([3000, 0]),
+        );
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let expected = ProbeSample::reference(source.pixels()[3000].map(f16::to_f32), &neutral);
+    let actual = probe.state.display.unwrap();
+    assert_eq!(actual.rgb8(), expected.rgb8());
+    let generation = probe.state.generation;
+    probe.refresh(
+        &device,
+        &queue,
+        Some(&source),
+        Some(&neutral),
+        Some([3000, 0]),
+    );
+    assert_eq!(generation, probe.state.generation);
+    assert!(!probe.is_pending(), "idle cursor must not submit GPU work");
+
+    let text = rendered_text(&mut probe);
+    assert!(text.iter().any(|s| s == "Pixel (3000, 0)"));
+    assert!(
+        text.iter()
+            .any(|s| s.starts_with("RGB ") && s.contains('#'))
+    );
+    assert!(text.iter().any(|s| s.starts_with("Oklab ")));
+    assert!(text.iter().any(|s| s == "Alpha 25.0% · sRGB"));
+
+    // A new image at identical coordinates/settings invalidates old work.
+    probe.refresh(
+        &device,
+        &queue,
+        Some(&source),
+        Some(&bright),
+        Some([3000, 0]),
+    );
+    probe.reset();
+    let replacement = ImageBuffer::new(3001, 1, vec![[f16::ZERO; 4]; 3001]).unwrap();
+    probe.refresh(
+        &device,
+        &queue,
+        Some(&replacement),
+        Some(&neutral),
+        Some([3000, 0]),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while probe.state.display.is_none() || probe.is_pending() {
+        device.poll(wgpu::PollType::Poll).unwrap();
+        probe.refresh(
+            &device,
+            &queue,
+            Some(&replacement),
+            Some(&neutral),
+            Some([3000, 0]),
+        );
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(probe.state.display, Some(ProbeSample::Transparent));
+    probe.refresh(&device, &queue, Some(&replacement), Some(&neutral), None);
+    assert!(probe.state.display.is_none());
+    assert!(!probe.is_pending());
+    // Unsupported settings and out-of-bounds targets never submit.
+    probe.refresh(&device, &queue, Some(&replacement), None, Some([3000, 0]));
+    probe.refresh(
+        &device,
+        &queue,
+        Some(&replacement),
+        Some(&neutral),
+        Some([3001, 0]),
+    );
+    assert!(probe.state.target.is_none() && !probe.is_pending());
+
+    let text = rendered_text(&mut probe);
+    assert!(has(&text, "Hover over the image"));
+
+    // Every remaining readout state explains itself within the reserved space.
+    probe.state.target = Some(([7, 0], *neutral.uniform_rows()));
+    for (display, line) in [
+        (Some(ProbeSample::Transparent), "Transparent · alpha 0%"),
+        (
+            Some(ProbeSample::Invalid),
+            "Invalid pixel · nonfinite color",
+        ),
+        (None, "Updating…"),
+    ] {
+        probe.state.display = display;
+        let text = rendered_text(&mut probe);
+        assert!(has(&text, "Pixel (7, 0)") && has(&text, line), "{text:?}");
+    }
+    probe.state.error = Some("Color probe mapping failed".into());
+    let text = rendered_text(&mut probe);
+    assert!(has(&text, "Color probe unavailable"));
+    assert!(has(&text, "Retry color probe"));
+    assert!(
+        !has(&text, "Pixel (7, 0)"),
+        "a failure must not show stale values"
+    );
 }

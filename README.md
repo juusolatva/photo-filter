@@ -131,13 +131,14 @@ These headless checks do not exercise native window interaction or file dialogs.
 Software-GPU viewport tests run before the separate large-image regression so
 rendering failures surface without waiting for the 36.6MP exports.
 
-The separate **SonarQube** job runs the ordinary workspace tests with
-`cargo-llvm-cov` and uploads LCOV coverage and source analysis to SonarQube Cloud.
+The separate **SonarQube** job runs the workspace tests, including the ignored
+software-GPU regressions on lavapipe, with `cargo-llvm-cov` and uploads LCOV
+coverage and source analysis to SonarQube Cloud.
 Fork and Dependabot pull requests still run coverage but skip the authenticated
 analysis. Pushes to `main`, same-repository pull requests and manual runs publish
 analysis using the repository's `SONAR_TOKEN` secret. Scanner packages use a weekly
-cache saved only from `main`. The coverage report excludes the ignored GPU and
-large-image tests, which continue to run in the Linux/Windows matrix.
+cache saved only from `main`. The coverage report excludes only the slow
+large-image export regression, which continues to run in the Linux/Windows matrix.
 Unit-test modules live under each crate's `tests/unit` directory so coverage
 excludes their bodies and SonarCloud can detect them as tests. CI passes an
 absolute LCOV path because SonarCloud analyzes each crate as a separate module.

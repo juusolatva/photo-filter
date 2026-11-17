@@ -41,7 +41,8 @@ submits no extra work. Leaving the image clears the readout. A current mapping
 failure remains visible until **Retry color probe** or loading a new image;
 retry re-enables sampling when the pointer returns to the image. Failed or
 disconnected mapping callbacks retire their buffers without unmapping them;
-the next submission allocates replacements.
+the next submission allocates replacements. The histogram uses the same
+`filter-gpu` readback ring, so this mapping/retirement rule has one implementation.
 
 Automated checks cover output clipping/encoding/Oklab, transparency, invalid
 samples, CPU/GPU agreement for basic adjustments, independent in-flight jobs,

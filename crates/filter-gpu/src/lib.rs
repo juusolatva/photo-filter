@@ -4,6 +4,7 @@ use wgpu::util::DeviceExt;
 
 mod histogram;
 mod probe;
+mod readback;
 pub use probe::GpuProbe;
 mod tiled;
 pub use histogram::GpuHistogram;

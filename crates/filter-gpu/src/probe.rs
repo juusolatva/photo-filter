@@ -1,33 +1,11 @@
 //! Fixed-size, double-buffered asynchronous source-pixel measurements.
-use anyhow::{Context, Result, bail, ensure};
+use crate::readback::Readback;
+use anyhow::{Result, bail, ensure};
 use filter_core::{cpu_eval::BasicAdjustments, probe::ProbeSample};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use wgpu::util::DeviceExt;
 
+/// Linear sRGB RGBA as four f32 values, then a u32 status, padded to 32 bytes.
 const BYTES: u64 = 32;
-struct Pending {
-    generation: u64,
-    ready: Receiver<Result<(), wgpu::BufferAsyncError>>,
-}
-struct Slot {
-    buffer: wgpu::Buffer,
-    pending: Option<Pending>,
-    replace_on_submit: bool,
-}
-impl Slot {
-    fn new(device: &wgpu::Device) -> Self {
-        Self {
-            buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("color probe readback"),
-                size: BYTES,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            }),
-            pending: None,
-            replace_on_submit: false,
-        }
-    }
-}
 
 pub struct GpuProbe {
     pipeline: wgpu::ComputePipeline,
@@ -35,7 +13,7 @@ pub struct GpuProbe {
     params: wgpu::Buffer,
     output: wgpu::Buffer,
     bindings: wgpu::BindGroup,
-    slots: [Slot; 2],
+    readback: Readback<u64>,
 }
 impl GpuProbe {
     pub fn new(device: &wgpu::Device) -> Result<Self> {
@@ -98,11 +76,11 @@ impl GpuProbe {
             params,
             output,
             bindings,
-            slots: std::array::from_fn(|_| Slot::new(device)),
+            readback: Readback::new(device, "Color probe", BYTES),
         })
     }
     pub fn is_pending(&self) -> bool {
-        self.slots.iter().any(|s| s.pending.is_some())
+        self.readback.is_pending()
     }
     /// Input is one original straight-alpha linear Rec.2020 pixel, not a
     /// premultiplied viewport texel. Returns false while both slots are occupied.
@@ -115,75 +93,40 @@ impl GpuProbe {
         settings: &BasicAdjustments,
         generation: u64,
     ) -> bool {
-        let Some(slot) = self.slots.iter_mut().find(|s| s.pending.is_none()) else {
-            return false;
-        };
-        if slot.replace_on_submit {
-            *slot = Slot::new(device);
-        }
-        queue.write_buffer(&self.pixel, 0, bytemuck::cast_slice(&pixel));
-        queue.write_buffer(
-            &self.params,
-            0,
-            bytemuck::cast_slice(settings.uniform_rows()),
-        );
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("color probe dispatch and copy"),
-        });
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bindings, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(&self.output, 0, &slot.buffer, 0, BYTES);
-        queue.submit([encoder.finish()]);
-        let (tx, ready) = mpsc::sync_channel(1);
-        slot.buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |r| {
-                let _ = tx.send(r);
+        self.readback.submit(device, generation, |readback| {
+            queue.write_buffer(&self.pixel, 0, bytemuck::cast_slice(&pixel));
+            queue.write_buffer(
+                &self.params,
+                0,
+                bytemuck::cast_slice(settings.uniform_rows()),
+            );
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("color probe dispatch and copy"),
             });
-        slot.pending = Some(Pending { generation, ready });
-        true
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bindings, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            encoder.copy_buffer_to_buffer(&self.output, 0, readback, 0, BYTES);
+            queue.submit([encoder.finish()]);
+        })
     }
     /// Consume callbacks after an ordinary nonblocking device poll. Only a
     /// successful map is unmapped; errors/disconnections retire that buffer.
     pub fn collect(&mut self) -> Vec<(u64, Result<ProbeSample>)> {
-        let mut results = Vec::new();
-        for slot in &mut self.slots {
-            let Some(pending) = &slot.pending else {
-                continue;
-            };
-            let mapping = match pending.ready.try_recv() {
-                Err(TryRecvError::Empty) => continue,
-                Err(TryRecvError::Disconnected) => {
-                    Err(anyhow::anyhow!("Color probe mapping callback disconnected"))
-                }
-                Ok(result) => result.context("Color probe mapping failed"),
-            };
-            let pending = slot.pending.take().unwrap();
-            let success = mapping.is_ok();
-            let result = mapping.and_then(|()| {
-                let bytes = slot.buffer.slice(..).get_mapped_range()?;
-                let status = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
-                Ok(match status {
-                    0 => ProbeSample::from_linear_srgb(std::array::from_fn(|i| {
-                        f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
-                    })),
-                    1 => ProbeSample::Transparent,
-                    2 => ProbeSample::Invalid,
-                    _ => bail!("Invalid color probe status"),
-                })
-            });
-            if success {
-                slot.buffer.unmap();
-            } else {
-                slot.replace_on_submit = true;
-            }
-            results.push((pending.generation, result));
-        }
-        results
+        self.readback.collect(|bytes, _| {
+            // The readback ring maps exactly BYTES, so these words exist.
+            let (words, _) = bytes.as_chunks::<4>();
+            let float = |i: usize| f32::from_le_bytes(words[i]);
+            Ok(match u32::from_le_bytes(words[4]) {
+                0 => ProbeSample::from_linear_srgb(std::array::from_fn(float)),
+                1 => ProbeSample::Transparent,
+                2 => ProbeSample::Invalid,
+                _ => bail!("Invalid color probe status"),
+            })
+        })
     }
 }
 
