@@ -51,77 +51,95 @@ impl PresetUi {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, edit: &EditState, enabled: bool) -> Option<Action> {
-        let mut action = None;
         egui::CollapsingHeader::new("Presets")
             .default_open(true)
             .show(ui, |ui| {
-                ui.add_enabled_ui(enabled, |ui| {
-                    if ui.button("Load preset…").clicked() {
-                        action = Some(Action::Load);
-                    }
-                    if let Some(preset) = &self.imported {
-                        ui.label(format!("Loaded: {}", preset.name));
-                        section_checkboxes(ui, &mut self.apply_sections, available(&preset.patch));
-                        let has_unknown = preset.patch.custom_stack.as_ref().is_some_and(|nodes| {
-                            nodes.iter().any(|n| {
-                                matches!(n.op, filter_core::pipeline::FilterOp::Unknown(_))
-                            })
-                        });
-                        if has_unknown {
-                            ui.label("Unknown filters are preserved and skipped by the renderer.");
-                        }
-                        if ui
-                            .add_enabled(
-                                any(self.apply_sections),
-                                egui::Button::new("Apply selected sections"),
-                            )
-                            .clicked()
-                        {
-                            match prepare_apply(edit, preset, &self.apply_sections) {
-                                Ok(next) => {
-                                    self.name = preset.name.clone();
-                                    self.save_sections = available(&preset.patch);
-                                    self.template = Some(preset.clone());
-                                    self.status = format!("Applied {}", preset.name);
-                                    action = Some(Action::Apply(Box::new(next)));
-                                }
-                                Err(error) => self.status = format!("Could not apply: {error}"),
-                            }
-                        }
-                        if ui.button("Close loaded preset").clicked() {
-                            self.imported = None;
-                        }
-                        ui.separator();
-                    }
-                    ui.label("Save current adjustments");
-                    ui.text_edit_singleline(&mut self.name);
-                    ui.collapsing("Sections to save", |ui| {
-                        section_checkboxes(ui, &mut self.save_sections, Sections::ALL);
-                    });
-                    if ui
-                        .add_enabled(
-                            !self.name.trim().is_empty() && any(self.save_sections),
-                            egui::Button::new("Save preset…"),
-                        )
-                        .clicked()
-                    {
-                        match capture(
-                            edit,
-                            &self.name,
-                            &self.save_sections,
-                            self.template.as_ref(),
-                        ) {
-                            Ok(preset) => action = Some(Action::Save(Box::new(preset))),
-                            Err(error) => self.status = format!("Could not save: {error}"),
-                        }
-                    }
-                });
+                let action = ui
+                    .add_enabled_ui(enabled, |ui| {
+                        let load = ui.button("Load preset…").clicked().then_some(Action::Load);
+                        let apply = self.loaded_controls(ui, edit);
+                        let save = self.save_controls(ui, edit);
+                        // At most one button is clicked per frame.
+                        save.or(apply).or(load)
+                    })
+                    .inner;
                 if !self.status.is_empty() {
                     ui.label(&self.status);
                 }
-            });
+                action
+            })
+            .body_returned
+            .flatten()
+    }
+
+    /// Section choice and apply/close for an imported preset, if any.
+    fn loaded_controls(&mut self, ui: &mut egui::Ui, edit: &EditState) -> Option<Action> {
+        let preset = self.imported.as_ref()?;
+        let mut action = None;
+        ui.label(format!("Loaded: {}", preset.name));
+        section_checkboxes(ui, &mut self.apply_sections, available(&preset.patch));
+        if has_unknown_filters(&preset.patch) {
+            ui.label("Unknown filters are preserved and skipped by the renderer.");
+        }
+        if ui
+            .add_enabled(
+                any(self.apply_sections),
+                egui::Button::new("Apply selected sections"),
+            )
+            .clicked()
+        {
+            match prepare_apply(edit, preset, &self.apply_sections) {
+                Ok(next) => {
+                    self.name = preset.name.clone();
+                    self.save_sections = available(&preset.patch);
+                    self.template = Some(preset.clone());
+                    self.status = format!("Applied {}", preset.name);
+                    action = Some(Action::Apply(Box::new(next)));
+                }
+                Err(error) => self.status = format!("Could not apply: {error}"),
+            }
+        }
+        if ui.button("Close loaded preset").clicked() {
+            self.imported = None;
+        }
+        ui.separator();
         action
     }
+
+    fn save_controls(&mut self, ui: &mut egui::Ui, edit: &EditState) -> Option<Action> {
+        ui.label("Save current adjustments");
+        ui.text_edit_singleline(&mut self.name);
+        ui.collapsing("Sections to save", |ui| {
+            section_checkboxes(ui, &mut self.save_sections, Sections::ALL);
+        });
+        let can_save = !self.name.trim().is_empty() && any(self.save_sections);
+        if !ui
+            .add_enabled(can_save, egui::Button::new("Save preset…"))
+            .clicked()
+        {
+            return None;
+        }
+        match capture(
+            edit,
+            &self.name,
+            &self.save_sections,
+            self.template.as_ref(),
+        ) {
+            Ok(preset) => Some(Action::Save(Box::new(preset))),
+            Err(error) => {
+                self.status = format!("Could not save: {error}");
+                None
+            }
+        }
+    }
+}
+
+fn has_unknown_filters(patch: &PresetPatch) -> bool {
+    patch.custom_stack.as_ref().is_some_and(|nodes| {
+        nodes
+            .iter()
+            .any(|n| matches!(n.op, filter_core::pipeline::FilterOp::Unknown(_)))
+    })
 }
 
 fn available(patch: &PresetPatch) -> Sections {
