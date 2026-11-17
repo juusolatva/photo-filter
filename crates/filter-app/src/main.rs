@@ -5,6 +5,7 @@ mod preset_ui;
 mod preview;
 mod probe_ui;
 mod resize;
+mod view;
 use std::sync::Arc;
 
 fn main() -> eframe::Result {

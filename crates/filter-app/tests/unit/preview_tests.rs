@@ -4,6 +4,7 @@ use super::{
     pixel_aligned, visible_tiles, with_border,
 };
 use filter_core::ImageBuffer;
+use filter_gpu::SourceTexture;
 use half::f16;
 use std::time::{Duration, Instant};
 
@@ -357,10 +358,267 @@ fn check_tile_failure_recovery(
     assert!(!regions.can_retry());
 }
 
+/// A software device and renderer for one surface format.
+struct Harness {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    renderer: Arc<ExposureRenderer>,
+    format: wgpu::TextureFormat,
+}
+impl Harness {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        Self {
+            device: device.clone(),
+            queue: queue.clone(),
+            renderer: Arc::new(ExposureRenderer::new(device, format)),
+            format,
+        }
+    }
+    fn regions(&self) -> RegionPreview {
+        RegionPreview::new(
+            self.renderer.clone(),
+            self.device.clone(),
+            self.queue.clone(),
+            egui::Context::default(),
+        )
+    }
+    fn updates(&self) -> ExposureUpdates {
+        ExposureUpdates::new(&self.device, &self.queue)
+    }
+    fn refined(
+        &self,
+        regions: &mut RegionPreview,
+        updates: &mut ExposureUpdates,
+        source: &Arc<DecodedImage>,
+        visible: egui::Rect,
+        settings: &BasicAdjustments,
+    ) -> Vec<ExposureFrame> {
+        refined(
+            regions,
+            &self.renderer,
+            &self.device,
+            updates,
+            source,
+            visible,
+            settings,
+        )
+    }
+    fn render(&self, size: (u32, u32), origin: (u32, u32), frames: &[ExposureFrame]) -> Vec<u8> {
+        render(
+            &self.renderer,
+            &self.device,
+            &self.queue,
+            self.format,
+            size,
+            origin,
+            frames,
+        )
+    }
+    /// Untiled proxy-path frame showing the `visible` source pixels.
+    fn untiled(
+        &self,
+        texture: &SourceTexture,
+        source: &DecodedImage,
+        visible: egui::Rect,
+        settings: &BasicAdjustments,
+    ) -> ExposureFrame {
+        let (w, h) = (source.buffer.width() as f32, source.buffer.height() as f32);
+        self.renderer.frame_region_adjusted(
+            &self.device,
+            texture,
+            settings,
+            [
+                visible.min.x / w,
+                visible.min.y / h,
+                visible.width() / w,
+                visible.height() / h,
+            ],
+        )
+    }
+}
+
+fn assert_bytes_close(actual: &[u8], expected: &[u8], context: &str) {
+    assert_eq!(actual.len(), expected.len(), "{context}");
+    for (i, (a, b)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (i32::from(*a) - i32::from(*b)).abs() <= 1,
+            "{context}, byte {i}: tiled {a}, untiled {b}"
+        );
+    }
+}
+
+/// At native scale each physical pixel must reproduce its source texel over
+/// the checkerboard, even beside a high-contrast neighbor. `origin` is the
+/// viewport origin used by the checkerboard.
+fn assert_native_pixels(
+    source: &DecodedImage,
+    settings: &BasicAdjustments,
+    shown: &[u8],
+    origin: (usize, usize),
+) {
+    let width = source.buffer.width() as usize;
+    for (i, (pixel, shown)) in source
+        .buffer
+        .pixels()
+        .iter()
+        .zip(shown.as_chunks::<4>().0)
+        .enumerate()
+    {
+        let [r, g, b, alpha] = settings.pixel(pixel.map(f16::to_f32));
+        let rgb = filter_core::color::rec2020_to_linear_srgb([r, g, b]);
+        let (x, y) = (i % width + origin.0, i / width + origin.1);
+        let checker = if (x / 12 + y / 12) % 2 == 0 {
+            0.28
+        } else {
+            0.18
+        };
+        for (channel, linear) in rgb.iter().enumerate() {
+            let composite = checker * (1.0 - alpha) + linear.clamp(0.0, 1.0) * alpha;
+            let expected = (filter_core::color::linear_to_srgb(composite) * 255.0).round() as i32;
+            assert!(
+                (i32::from(shown[channel]) - expected).abs() <= 1,
+                "native pixel {i}, channel {channel}: {} vs {expected}",
+                shown[channel]
+            );
+        }
+    }
+}
+
+/// A result requested for an old source is discarded by reset.
+fn check_stale_source_is_discarded(
+    gpu: &Harness,
+    regions: &mut RegionPreview,
+    updates: &mut ExposureUpdates,
+) {
+    let old = source(67, 37, false);
+    let frames = regions.frames(
+        &gpu.renderer,
+        &gpu.device,
+        updates,
+        &old,
+        rect(0.0, 0.0, 67.0, 37.0),
+        &BasicAdjustments::default(),
+    );
+    assert!(frames.is_empty());
+    assert!(regions.pending);
+    regions.reset();
+}
+
+/// Tiled output matches the untiled path at native and fractional scales,
+/// and panning or edits reuse cached tiles and their bind groups.
+fn check_tiles_match_untiled_across_pans_and_edits(
+    gpu: &Harness,
+    regions: &mut RegionPreview,
+    updates: &mut ExposureUpdates,
+    image: &Arc<DecodedImage>,
+) {
+    let texture = gpu.renderer.upload(&gpu.device, &gpu.queue, &image.buffer);
+    let full = rect(0.0, 0.0, 67.0, 37.0);
+    let mut bindings = Vec::new();
+    for settings in [
+        BasicAdjustments::default(),
+        BasicAdjustments::exposure(1.25).unwrap(),
+    ] {
+        for (visible, size) in [(full, (67, 37)), (rect(14.25, 14.5, 51.5, 21.25), (97, 69))] {
+            let frames = gpu.refined(regions, updates, image, visible, &settings);
+            let reference = gpu.untiled(&texture, image, visible, &settings);
+            let expected = gpu.render(size, (7, 9), &[reference]);
+            let actual = gpu.render(size, (7, 9), &frames);
+            assert_bytes_close(&actual, &expected, &format!("{:?} {visible:?}", gpu.format));
+            if visible == full {
+                assert_native_pixels(image, &settings, &actual, (7, 9));
+            }
+        }
+        let current: Vec<_> = regions
+            .cache
+            .iter()
+            .map(|c| (c.tile, c.frame.as_ref().unwrap().bind_group.clone()))
+            .collect();
+        if bindings.is_empty() {
+            bindings = current;
+        } else {
+            assert_eq!(
+                bindings, current,
+                "panning and edits must reuse bind groups and their uniform buffers"
+            );
+        }
+    }
+    // Offscreen tiles survive panning and adjustment changes without uploads.
+    assert_eq!(regions.cache.len(), 15);
+    assert!(!regions.pending);
+}
+
+/// Views larger than the cache evict tiles and keep a stable working set.
+fn check_cache_stays_bounded(
+    gpu: &Harness,
+    regions: &mut RegionPreview,
+    updates: &mut ExposureUpdates,
+    large: &Arc<DecodedImage>,
+) {
+    regions.reset();
+    let settings = BasicAdjustments::default();
+    for view in [rect(0.0, 0.0, 257.0, 257.0), rect(180.0, 180.0, 77.0, 77.0)] {
+        gpu.refined(regions, updates, large, view, &settings);
+        assert_eq!(regions.cache.len(), CACHE_TILES);
+    }
+    assert!(!regions.pending);
+}
+
+/// The source exceeds the granted texture limit on both axes. Compare against
+/// an untiled reference on the unrestricted device.
+fn check_texture_limited_tiles(gpu: &Harness, limited: &Harness, large: &Arc<DecodedImage>) {
+    let mut regions = limited.regions();
+    assert_eq!(regions.edge, 62);
+    let mut updates = limited.updates();
+    let visible = rect(60.25, 60.5, 128.5, 125.25);
+    let settings = BasicAdjustments::exposure(-0.5).unwrap();
+    let frames = limited.refined(&mut regions, &mut updates, large, visible, &settings);
+    let texture = gpu.renderer.upload(&gpu.device, &gpu.queue, &large.buffer);
+    let reference = gpu.untiled(&texture, large, visible, &settings);
+    let expected = gpu.render((63, 61), (0, 0), &[reference]);
+    let actual = limited.render((63, 61), (0, 0), &frames);
+    assert_bytes_close(&actual, &expected, &format!("{:?} limited", gpu.format));
+    let too_wide = Tile {
+        x: 0,
+        y: 0,
+        width: 65,
+        height: 1,
+    };
+    assert!(
+        limited
+            .renderer
+            .upload_region(&limited.device, &limited.queue, &large.buffer, too_wide)
+            .is_err()
+    );
+}
+
+fn check_invalid_tile_uploads_fail(gpu: &Harness, image: &DecodedImage) {
+    for tile in [
+        Tile {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 1,
+        },
+        Tile {
+            x: u32::MAX,
+            y: 0,
+            width: 2,
+            height: 1,
+        },
+    ] {
+        assert!(
+            gpu.renderer
+                .upload_region(&gpu.device, &gpu.queue, &image.buffer, tile)
+                .is_err()
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires a Vulkan/DX12/Metal software adapter"]
 fn full_resolution_regions_match_untiled_and_reject_stale_uploads() {
-    pollster::block_on(async {
+    let (device, queue, limited_device, limited_queue) = pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY)
                 & wgpu::Backends::PRIMARY,
@@ -385,251 +643,24 @@ fn full_resolution_regions_match_untiled_and_reject_stale_uploads() {
             })
             .await
             .unwrap();
-        for format in [
-            wgpu::TextureFormat::Rgba8Unorm,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-        ] {
-            let renderer = Arc::new(ExposureRenderer::new(&device, format));
-            check_tile_failure_recovery(&renderer, &device, &queue);
-            let mut updates = ExposureUpdates::new(&device, &queue);
-            let mut regions = RegionPreview::new(
-                renderer.clone(),
-                device.clone(),
-                queue.clone(),
-                egui::Context::default(),
-            );
-            regions.edge = 16;
-            let old = source(67, 37, false);
-            let image = source(67, 37, true);
-            let full = rect(0.0, 0.0, 67.0, 37.0);
-            assert!(
-                regions
-                    .frames(
-                        &renderer,
-                        &device,
-                        &mut updates,
-                        &old,
-                        full,
-                        &BasicAdjustments::default()
-                    )
-                    .is_empty()
-            );
-            assert!(regions.pending);
-            regions.reset();
-            let texture = renderer.upload(&device, &queue, &image.buffer);
-            let mut bindings = Vec::new();
-            for settings in [
-                BasicAdjustments::default(),
-                BasicAdjustments::exposure(1.25).unwrap(),
-            ] {
-                for (visible, size) in
-                    [(full, (67, 37)), (rect(14.25, 14.5, 51.5, 21.25), (97, 69))]
-                {
-                    let frames = refined(
-                        &mut regions,
-                        &renderer,
-                        &device,
-                        &mut updates,
-                        &image,
-                        visible,
-                        &settings,
-                    );
-                    let expected = render(
-                        &renderer,
-                        &device,
-                        &queue,
-                        format,
-                        size,
-                        (7, 9),
-                        &[renderer.frame_region_adjusted(
-                            &device,
-                            &texture,
-                            &settings,
-                            [
-                                visible.min.x / 67.0,
-                                visible.min.y / 37.0,
-                                visible.width() / 67.0,
-                                visible.height() / 37.0,
-                            ],
-                        )],
-                    );
-                    let actual = render(&renderer, &device, &queue, format, size, (7, 9), &frames);
-                    for (i, (a, b)) in actual.iter().zip(&expected).enumerate() {
-                        assert!(
-                            (i32::from(*a) - i32::from(*b)).abs() <= 1,
-                            "{format:?} {visible:?}, byte {i}: tiled {a}, untiled {b}"
-                        );
-                    }
-                    if visible == full {
-                        // At native scale each physical pixel must reproduce
-                        // its source texel, even beside a high-contrast neighbor.
-                        for (i, (pixel, shown)) in image
-                            .buffer
-                            .pixels()
-                            .iter()
-                            .zip(actual.as_chunks::<4>().0)
-                            .enumerate()
-                        {
-                            let pixel = settings.pixel(pixel.map(f16::to_f32));
-                            let rgb = filter_core::color::rec2020_to_linear_srgb(
-                                pixel[..3].try_into().unwrap(),
-                            );
-                            let checker = if ((i % 67 + 7) / 12 + (i / 67 + 9) / 12) % 2 == 0 {
-                                0.28
-                            } else {
-                                0.18
-                            };
-                            for (channel, linear) in rgb.iter().enumerate() {
-                                let composite =
-                                    checker * (1.0 - pixel[3]) + linear.clamp(0.0, 1.0) * pixel[3];
-                                let expected = (filter_core::color::linear_to_srgb(composite)
-                                    * 255.0)
-                                    .round() as i32;
-                                assert!(
-                                    (i32::from(shown[channel]) - expected).abs() <= 1,
-                                    "native pixel {i}, channel {channel}: {} vs {expected}",
-                                    shown[channel]
-                                );
-                            }
-                        }
-                    }
-                }
-                let current: Vec<_> = regions
-                    .cache
-                    .iter()
-                    .map(|c| (c.tile, c.frame.as_ref().unwrap().bind_group.clone()))
-                    .collect();
-                if bindings.is_empty() {
-                    bindings = current;
-                } else {
-                    assert_eq!(
-                        bindings, current,
-                        "panning and edits must reuse bind groups and their uniform buffers"
-                    );
-                }
-            }
-            // Offscreen tiles survive panning and adjustment changes without uploads.
-            assert_eq!(regions.cache.len(), 15);
-            assert!(!regions.pending);
-            // Exercise the eviction path and stable behavior when a view exceeds capacity.
-            regions.reset();
-            let large = source(257, 257, false);
-            let view = rect(0.0, 0.0, 257.0, 257.0);
-            refined(
-                &mut regions,
-                &renderer,
-                &device,
-                &mut updates,
-                &large,
-                view,
-                &BasicAdjustments::default(),
-            );
-            assert_eq!(regions.cache.len(), CACHE_TILES);
-            let shifted = rect(180.0, 180.0, 77.0, 77.0);
-            refined(
-                &mut regions,
-                &renderer,
-                &device,
-                &mut updates,
-                &large,
-                shifted,
-                &BasicAdjustments::default(),
-            );
-            assert_eq!(regions.cache.len(), CACHE_TILES);
-            assert!(!regions.pending);
-            // The source exceeds the granted texture limit on both axes.
-            // Compare against an untiled reference on the unrestricted device.
-            let limited_renderer = Arc::new(ExposureRenderer::new(&limited_device, format));
-            let mut limited_regions = RegionPreview::new(
-                limited_renderer.clone(),
-                limited_device.clone(),
-                limited_queue.clone(),
-                egui::Context::default(),
-            );
-            assert_eq!(limited_regions.edge, 62);
-            let mut limited_updates = ExposureUpdates::new(&limited_device, &limited_queue);
-            let visible = rect(60.25, 60.5, 128.5, 125.25);
-            let settings = BasicAdjustments::exposure(-0.5).unwrap();
-            let frames = refined(
-                &mut limited_regions,
-                &limited_renderer,
-                &limited_device,
-                &mut limited_updates,
-                &large,
-                visible,
-                &settings,
-            );
-            let large_texture = renderer.upload(&device, &queue, &large.buffer);
-            let reference = renderer.frame_region_adjusted(
-                &device,
-                &large_texture,
-                &settings,
-                [
-                    visible.min.x / 257.0,
-                    visible.min.y / 257.0,
-                    visible.width() / 257.0,
-                    visible.height() / 257.0,
-                ],
-            );
-            let expected = render(
-                &renderer,
-                &device,
-                &queue,
-                format,
-                (63, 61),
-                (0, 0),
-                &[reference],
-            );
-            let actual = render(
-                &limited_renderer,
-                &limited_device,
-                &limited_queue,
-                format,
-                (63, 61),
-                (0, 0),
-                &frames,
-            );
-            assert!(
-                actual
-                    .iter()
-                    .zip(&expected)
-                    .all(|(a, b)| (i32::from(*a) - i32::from(*b)).abs() <= 1)
-            );
-            assert!(
-                limited_renderer
-                    .upload_region(
-                        &limited_device,
-                        &limited_queue,
-                        &large.buffer,
-                        Tile {
-                            x: 0,
-                            y: 0,
-                            width: 65,
-                            height: 1
-                        }
-                    )
-                    .is_err()
-            );
-            for tile in [
-                Tile {
-                    x: 0,
-                    y: 0,
-                    width: 0,
-                    height: 1,
-                },
-                Tile {
-                    x: u32::MAX,
-                    y: 0,
-                    width: 2,
-                    height: 1,
-                },
-            ] {
-                assert!(
-                    renderer
-                        .upload_region(&device, &queue, &image.buffer, tile)
-                        .is_err()
-                );
-            }
-        }
+        (device, queue, limited_device, limited_queue)
     });
+    for format in [
+        wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    ] {
+        let gpu = Harness::new(&device, &queue, format);
+        let limited = Harness::new(&limited_device, &limited_queue, format);
+        check_tile_failure_recovery(&gpu.renderer, &device, &queue);
+        let mut regions = gpu.regions();
+        regions.edge = 16;
+        let mut updates = gpu.updates();
+        check_stale_source_is_discarded(&gpu, &mut regions, &mut updates);
+        let image = source(67, 37, true);
+        check_tiles_match_untiled_across_pans_and_edits(&gpu, &mut regions, &mut updates, &image);
+        let large = source(257, 257, false);
+        check_cache_stays_bounded(&gpu, &mut regions, &mut updates, &large);
+        check_texture_limited_tiles(&gpu, &limited, &large);
+        check_invalid_tile_uploads_fail(&gpu, &image);
+    }
 }

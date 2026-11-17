@@ -106,6 +106,18 @@ pub struct RegionPreview {
     pub error: Option<String>,
 }
 
+#[cfg(test)]
+impl RegionPreview {
+    /// Full-resolution tiles drawn at least once since the last reset; only
+    /// tiles returned to the viewport for painting have frames.
+    pub fn drawn_tiles(&self) -> usize {
+        self.cache.iter().filter(|c| c.frame.is_some()).count()
+    }
+    pub fn is_pending(&self) -> bool {
+        self.pending
+    }
+}
+
 impl RegionPreview {
     pub fn new(
         renderer: Arc<ExposureRenderer>,

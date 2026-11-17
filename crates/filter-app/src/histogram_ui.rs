@@ -115,158 +115,206 @@ impl HistogramUi {
         if !ui.is_rect_visible(rect) {
             return;
         }
-        let painter = ui.painter();
         let text = ui.visuals().text_color();
-        let font = egui::FontId::proportional(11.0);
-        painter.text(
-            rect.min,
-            egui::Align2::LEFT_TOP,
-            "Histogram",
-            egui::FontId::proportional(16.0),
-            text,
-        );
-        let colors = [
-            egui::Color32::from_rgb(255, 100, 100),
-            egui::Color32::from_rgb(100, 220, 130),
-            egui::Color32::from_rgb(110, 160, 255),
-            egui::Color32::LIGHT_GRAY,
-        ];
-        for (i, label) in ["R", "G", "B", "Y"].iter().enumerate() {
-            painter.text(
-                rect.min + egui::vec2(i as f32 * 28.0, 22.0),
-                egui::Align2::LEFT_TOP,
-                label,
-                font.clone(),
-                colors[i],
-            );
-        }
-        let plot = egui::Rect::from_min_max(
-            rect.min + egui::vec2(0.0, 40.0),
-            egui::pos2(rect.max.x, rect.min.y + 130.0),
-        );
-        painter.rect_filled(plot, 3.0, egui::Color32::from_gray(20));
-        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            let x = plot.left() + t * plot.width();
-            painter.line_segment(
-                [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
-                egui::Stroke::new(1.0, egui::Color32::from_gray(45)),
-            );
-        }
+        let plot = paint_frame(ui.painter(), rect, text);
         let error = self.gpu.as_ref().err().or(self.state.error.as_ref());
-        if let Some(error) = error {
-            painter.text(
-                plot.center() - egui::vec2(0.0, 22.0),
-                egui::Align2::CENTER_CENTER,
-                "Histogram unavailable",
-                font.clone(),
-                egui::Color32::LIGHT_RED,
-            );
-            ui.interact(
-                plot,
-                ui.scope_id().with("histogram_error"),
-                egui::Sense::hover(),
-            )
-            .on_hover_text(error);
-            if self.gpu.is_ok()
-                && ui
-                    .put(
-                        egui::Rect::from_center_size(
-                            plot.center() + egui::vec2(0.0, 6.0),
-                            egui::vec2(110.0, 22.0),
-                        ),
-                        egui::Button::new("Retry histogram"),
-                    )
-                    .clicked()
-            {
-                self.state.retry();
-                ui.ctx().request_repaint();
-            }
+        if let Some(error) = error.cloned() {
+            self.show_error(ui, plot, &error);
             return;
         }
         let current = self.state.current();
         if let Some((_, histogram)) = &self.state.display {
-            let peak = histogram
-                .bins
-                .iter()
-                .flatten()
-                .copied()
-                .max()
-                .unwrap_or(1)
-                .max(1) as f32;
-            for channel in [3, 0, 1, 2] {
-                let points = histogram.bins[channel]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, count)| {
-                        egui::pos2(
-                            plot.left() + i as f32 / (BINS - 1) as f32 * plot.width(),
-                            plot.bottom() - *count as f32 / peak * (plot.height() - 2.0),
-                        )
-                    })
-                    .collect();
-                painter.line(
-                    points,
-                    egui::Stroke::new(
-                        1.0,
-                        colors[channel].gamma_multiply(if current { 0.9 } else { 0.3 }),
-                    ),
-                );
-            }
+            paint_curves(ui.painter(), plot, histogram, current);
             if current {
-                painter.text(
-                    rect.min + egui::vec2(0.0, 136.0),
-                    egui::Align2::LEFT_TOP,
-                    format!(
-                        "RGB clips: {} low · {} high",
-                        histogram.low_pixels, histogram.high_pixels
-                    ),
-                    font.clone(),
-                    text,
-                );
-                painter.text(
-                    rect.min + egui::vec2(0.0, 153.0),
-                    egui::Align2::LEFT_TOP,
-                    format!("Preview · {} visible pixels", histogram.sampled),
-                    font.clone(),
-                    text,
-                );
-                if histogram.sampled == 0 {
-                    painter.text(
-                        plot.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "No valid visible pixels",
-                        font.clone(),
-                        text,
-                    );
-                }
+                paint_summary(ui.painter(), rect, plot, histogram, text);
             }
         }
         if !current {
-            painter.text(
+            ui.painter().text(
                 plot.center(),
                 egui::Align2::CENTER_CENTER,
-                if !self.has_source {
-                    "Open an image"
-                } else if self.state.settings.is_none() {
-                    "Unsupported adjustments"
-                } else {
-                    "Updating…"
-                },
-                font.clone(),
+                self.placeholder(),
+                small_font(),
                 text,
             );
         }
-        ui.interact(rect, ui.scope_id().with("histogram"), egui::Sense::hover()).on_hover_ui(|ui| {
-            ui.label("Whole-image preview, independent of pan/zoom. RGB uses encoded sRGB; Y encodes linear Rec.709 luminance after output clipping. No checkerboard, alpha flattening or dithering.");
-            ui.label("Fully transparent pixels are excluded; partial alpha counts once. RGB clipping counts pixels with any channel at black (≤0) or white (≥1), including exact endpoints. A pixel may count toward both.");
-            if current && let Some((_, h)) = &self.state.display {
-                ui.label(format!("Samples: {} · transparent: {} · invalid: {}", h.sampled, h.transparent, h.invalid));
-                for (i, label) in ["R", "G", "B", "Y"].iter().enumerate() {
-                    ui.label(format!("{label}: {} low · {} high", h.clipped_low[i], h.clipped_high[i]));
+        ui.interact(rect, ui.scope_id().with("histogram"), egui::Sense::hover())
+            .on_hover_ui(|ui| self.hover_details(ui, current));
+    }
+
+    fn show_error(&mut self, ui: &mut egui::Ui, plot: egui::Rect, error: &str) {
+        ui.painter().text(
+            plot.center() - egui::vec2(0.0, 22.0),
+            egui::Align2::CENTER_CENTER,
+            "Histogram unavailable",
+            small_font(),
+            egui::Color32::LIGHT_RED,
+        );
+        ui.interact(
+            plot,
+            ui.scope_id().with("histogram_error"),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(error);
+        let retry = egui::Rect::from_center_size(
+            plot.center() + egui::vec2(0.0, 6.0),
+            egui::vec2(110.0, 22.0),
+        );
+        if self.gpu.is_ok()
+            && ui
+                .put(retry, egui::Button::new("Retry histogram"))
+                .clicked()
+        {
+            self.state.retry();
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Why no current histogram is shown.
+    fn placeholder(&self) -> &'static str {
+        if !self.has_source {
+            "Open an image"
+        } else if self.state.settings.is_none() {
+            "Unsupported adjustments"
+        } else {
+            "Updating…"
+        }
+    }
+
+    fn hover_details(&self, ui: &mut egui::Ui, current: bool) {
+        ui.label("Whole-image preview, independent of pan/zoom. RGB uses encoded sRGB; Y encodes linear Rec.709 luminance after output clipping. No checkerboard, alpha flattening or dithering.");
+        ui.label("Fully transparent pixels are excluded; partial alpha counts once. RGB clipping counts pixels with any channel at black (≤0) or white (≥1), including exact endpoints. A pixel may count toward both.");
+        match &self.state.display {
+            Some((_, h)) if current => {
+                ui.label(format!(
+                    "Samples: {} · transparent: {} · invalid: {}",
+                    h.sampled, h.transparent, h.invalid
+                ));
+                for (i, label) in CHANNELS.iter().enumerate() {
+                    ui.label(format!(
+                        "{label}: {} low · {} high",
+                        h.clipped_low[i], h.clipped_high[i]
+                    ));
                 }
             }
-            if !current && self.state.display.is_some() { ui.label("Dimmed curves show the last completed edit while the current histogram updates."); }
-        });
+            Some(_) => {
+                ui.label(
+                    "Dimmed curves show the last completed edit while the current histogram updates.",
+                );
+            }
+            None => {}
+        }
+    }
+}
+
+const CHANNELS: [&str; 4] = ["R", "G", "B", "Y"];
+const COLORS: [egui::Color32; 4] = [
+    egui::Color32::from_rgb(255, 100, 100),
+    egui::Color32::from_rgb(100, 220, 130),
+    egui::Color32::from_rgb(110, 160, 255),
+    egui::Color32::LIGHT_GRAY,
+];
+
+fn small_font() -> egui::FontId {
+    egui::FontId::proportional(11.0)
+}
+
+/// Title, channel legend and plot grid; returns the plot area.
+fn paint_frame(painter: &egui::Painter, rect: egui::Rect, text: egui::Color32) -> egui::Rect {
+    painter.text(
+        rect.min,
+        egui::Align2::LEFT_TOP,
+        "Histogram",
+        egui::FontId::proportional(16.0),
+        text,
+    );
+    for (i, label) in CHANNELS.iter().enumerate() {
+        painter.text(
+            rect.min + egui::vec2(i as f32 * 28.0, 22.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            small_font(),
+            COLORS[i],
+        );
+    }
+    let plot = egui::Rect::from_min_max(
+        rect.min + egui::vec2(0.0, 40.0),
+        egui::pos2(rect.max.x, rect.min.y + 130.0),
+    );
+    painter.rect_filled(plot, 3.0, egui::Color32::from_gray(20));
+    for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        let x = plot.left() + t * plot.width();
+        painter.line_segment(
+            [egui::pos2(x, plot.top()), egui::pos2(x, plot.bottom())],
+            egui::Stroke::new(1.0, egui::Color32::from_gray(45)),
+        );
+    }
+    plot
+}
+
+/// Luminance first, then RGB on top; older results are dimmed.
+fn paint_curves(painter: &egui::Painter, plot: egui::Rect, histogram: &Histogram, current: bool) {
+    let peak = histogram
+        .bins
+        .iter()
+        .flatten()
+        .copied()
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    for channel in [3, 0, 1, 2] {
+        let points = histogram.bins[channel]
+            .iter()
+            .enumerate()
+            .map(|(i, count)| {
+                egui::pos2(
+                    plot.left() + i as f32 / (BINS - 1) as f32 * plot.width(),
+                    plot.bottom() - *count as f32 / peak * (plot.height() - 2.0),
+                )
+            })
+            .collect();
+        painter.line(
+            points,
+            egui::Stroke::new(
+                1.0,
+                COLORS[channel].gamma_multiply(if current { 0.9 } else { 0.3 }),
+            ),
+        );
+    }
+}
+
+fn paint_summary(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    plot: egui::Rect,
+    histogram: &Histogram,
+    text: egui::Color32,
+) {
+    painter.text(
+        rect.min + egui::vec2(0.0, 136.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "RGB clips: {} low · {} high",
+            histogram.low_pixels, histogram.high_pixels
+        ),
+        small_font(),
+        text,
+    );
+    painter.text(
+        rect.min + egui::vec2(0.0, 153.0),
+        egui::Align2::LEFT_TOP,
+        format!("Preview · {} visible pixels", histogram.sampled),
+        small_font(),
+        text,
+    );
+    if histogram.sampled == 0 {
+        painter.text(
+            plot.center(),
+            egui::Align2::CENTER_CENTER,
+            "No valid visible pixels",
+            small_font(),
+            text,
+        );
     }
 }
 
