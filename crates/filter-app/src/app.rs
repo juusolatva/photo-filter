@@ -2,6 +2,7 @@ use crate::export::{ExportFormat, ExportJob, ExportResult};
 use crate::histogram_ui::HistogramUi;
 use crate::preset_ui::{Action as PresetAction, PresetUi};
 use crate::preview::{PreviewCallback, RegionPreview, needs_regions, pixel_aligned};
+use crate::probe_ui::{ProbeUi, source_pixel};
 use crate::resize::ExportResize;
 use eframe::egui;
 use filter_core::{
@@ -56,6 +57,7 @@ pub struct PhotoApp {
     preview_frame: Option<ExposureFrame>,
     preview_updates: ExposureUpdates,
     histogram: HistogramUi,
+    probe: ProbeUi,
     regions: RegionPreview,
     proxy_scale: f32,
     load_tx: mpsc::Sender<(u64, PathBuf)>,
@@ -125,6 +127,7 @@ impl PhotoApp {
             preview_frame: None,
             preview_updates: ExposureUpdates::new(&rs.device, &rs.queue),
             histogram: HistogramUi::new(&rs.device),
+            probe: ProbeUi::new(&rs.device),
             regions,
             proxy_scale: 1.0,
             load_tx,
@@ -348,6 +351,7 @@ impl eframe::App for PhotoApp {
                 Ok((source, proxy)) => {
                     self.regions.reset();
                     self.histogram.reset();
+                    self.probe.reset();
                     self.preview_frame = None;
                     self.proxy_scale = (proxy.width() as f32 / source.buffer.width() as f32)
                         .min(proxy.height() as f32 / source.buffer.height() as f32);
@@ -425,6 +429,7 @@ impl eframe::App for PhotoApp {
             }
         });
         let mut adjustments_changed = false;
+        let mut probe_panel = None;
         egui::Panel::right("adjustments")
             .default_size(220.0)
             .show(ui, |ui| {
@@ -435,6 +440,14 @@ impl eframe::App for PhotoApp {
                             egui::Sense::hover(),
                         )
                         .0;
+                    let probe_rect = ui
+                        .allocate_exact_size(
+                            egui::vec2(ui.available_width(), ProbeUi::HEIGHT),
+                            egui::Sense::hover(),
+                        )
+                        .0;
+                    // Paint after the canvas computes this frame's cursor target.
+                    probe_panel = Some(ui.new_child(egui::UiBuilder::new().max_rect(probe_rect)));
                     ui.separator();
                     ui.heading("Basic adjustments");
                     ui.add_enabled_ui(self.source.is_some(), |ui| {
@@ -640,6 +653,7 @@ impl eframe::App for PhotoApp {
                     self.histogram.show(ui, histogram_rect);
                 });
             });
+        let mut probe_coordinate = None;
         egui::CentralPanel::default().show(ui, |ui| {
             let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
             ui.painter()
@@ -685,6 +699,12 @@ impl eframe::App for PhotoApp {
                     // 100%, including after panning, resizing or a DPI change.
                     image_rect = pixel_aligned(image_rect, ctx.pixels_per_point());
                 }
+                probe_coordinate = source_pixel(
+                    response.hover_pos(),
+                    rect,
+                    image_rect,
+                    [source.buffer.width(), source.buffer.height()],
+                );
                 let mut visible = image_rect.intersect(rect);
                 if self.native_pixels {
                     visible = pixel_aligned(visible, ctx.pixels_per_point());
@@ -747,11 +767,21 @@ impl eframe::App for PhotoApp {
                 );
             }
         });
+        self.probe.refresh(
+            &rs.device,
+            &rs.queue,
+            self.source.as_ref().map(|s| &s.buffer),
+            self.adjustments.as_ref().ok(),
+            probe_coordinate,
+        );
+        if let Some(mut panel) = probe_panel {
+            self.probe.show(&mut panel);
+        }
         let _ = rs.device.poll(wgpu::PollType::Poll);
         if self.loading || self.export.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
-        if self.histogram.is_pending() {
+        if self.histogram.is_pending() || self.probe.is_pending() {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }

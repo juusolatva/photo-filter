@@ -1,5 +1,12 @@
 # Photo Filter Studio
 
+[![CI](https://github.com/juusolatva/photo-filter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/juusolatva/photo-filter/actions/workflows/ci.yml)
+[![Security](https://github.com/juusolatva/photo-filter/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/juusolatva/photo-filter/actions/workflows/security.yml)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=juusolatva_photo-filter&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=juusolatva_photo-filter)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=juusolatva_photo-filter&metric=coverage)](https://sonarcloud.io/summary/new_code?id=juusolatva_photo-filter)
+[![Rust](https://img.shields.io/badge/rust-2024%20edition-orange?logo=rust)](Cargo.toml)
+[![License: MIT](https://img.shields.io/github/license/juusolatva/photo-filter)](LICENSE)
+
 A native Rust photo editor for Linux and Windows, with a Phase 0 viewer/export spike and the Phase 1 edit model and basic pointwise renderer from [the implementation plan](PLAN.md).
 
 For hands-on checks, use the [Linux and Windows test checklist](docs/manual-testing.md).
@@ -21,7 +28,7 @@ within a 128 MiB texture-payload budget (excluding driver overhead and in-flight
 Very large visible source regions refine a central subset and retain the proxy elsewhere.
 Tiles survive panning and adjustment changes; each draw uses the current basic settings,
 and results from a previous image are discarded. No full-image GPU texture or region
-readback is required. Spatial filtering and cursor probe remain pending.
+readback is required. Spatial filtering remains pending.
 Below 100%, the area-filtered proxy stays visible to avoid aliasing from minifying
 single-level source tiles; filtered region rendering at intermediate scales remains pending.
 Viewport bilinear interpolation uses explicit float math to avoid adapter-dependent
@@ -42,6 +49,16 @@ exact endpoints. Counts describe the proxy rather than full-resolution export pi
 Older curves are dimmed and marked **Updating…** while the current edit is measured;
 results from superseded edits/images cannot replace current data. Failed readback
 offers **Retry histogram**. See [the histogram contract](docs/histogram.md).
+
+Hover over the image for a **Cursor color** readout below the histogram: source
+pixel coordinates, edited RGB/hex, Oklab and alpha. It measures the original
+full-resolution pixel at every zoom level, so Fit/bilinear screen colors can differ.
+RGB/hex use nearest 8-bit clipped sRGB; Oklab describes the same output color,
+with alpha separate and no checkerboard, flattening or dithering. Transparent
+pixels show no hidden color. Leaving the image clears the reading; older
+cursor/edit/image results are discarded. **Retry color probe** recovers a failed
+readback. Sampling is bounded and asynchronous on the viewer's device.
+See [the cursor probe contract and manual checks](docs/probe.md).
 
 Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
 
@@ -114,13 +131,14 @@ These headless checks do not exercise native window interaction or file dialogs.
 Software-GPU viewport tests run before the separate large-image regression so
 rendering failures surface without waiting for the 36.6MP exports.
 
-The separate **SonarQube** job runs the ordinary workspace tests with
-`cargo-llvm-cov` and uploads LCOV coverage and source analysis to SonarQube Cloud.
+The separate **SonarQube** job runs the workspace tests, including the ignored
+software-GPU regressions on lavapipe, with `cargo-llvm-cov` and uploads LCOV
+coverage and source analysis to SonarQube Cloud.
 Fork and Dependabot pull requests still run coverage but skip the authenticated
 analysis. Pushes to `main`, same-repository pull requests and manual runs publish
 analysis using the repository's `SONAR_TOKEN` secret. Scanner packages use a weekly
-cache saved only from `main`. The coverage report excludes the ignored GPU and
-large-image tests, which continue to run in the Linux/Windows matrix.
+cache saved only from `main`. The coverage report excludes only the slow
+large-image export regression, which continues to run in the Linux/Windows matrix.
 Unit-test modules live under each crate's `tests/unit` directory so coverage
 excludes their bodies and SonarCloud can detect them as tests. CI passes an
 absolute LCOV path because SonarCloud analyzes each crate as a separate module.

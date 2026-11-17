@@ -1,40 +1,20 @@
 //! Bounded, double-buffered asynchronous histogram readback on the caller's device.
-use crate::SourceTexture;
-use anyhow::{Context, Result, ensure};
+use crate::{SourceTexture, readback::Readback};
+use anyhow::{Result, ensure};
 use filter_core::{
     cpu_eval::BasicAdjustments,
     histogram::{Histogram, WORDS},
 };
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use wgpu::util::DeviceExt;
 
 const BYTES: u64 = (WORDS * 4) as u64;
 pub const MAX_HISTOGRAM_EDGE: u32 = 2048;
 
-struct Pending {
+/// Readback tag: edit generation and expected source pixel count.
+#[derive(Clone, Copy)]
+struct Job {
     generation: u64,
     pixels: u64,
-    ready: Receiver<Result<(), wgpu::BufferAsyncError>>,
-}
-
-struct Slot {
-    buffer: wgpu::Buffer,
-    pending: Option<Pending>,
-    replace_on_submit: bool,
-}
-impl Slot {
-    fn new(device: &wgpu::Device) -> Self {
-        Self {
-            buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("histogram readback"),
-                size: BYTES,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            }),
-            pending: None,
-            replace_on_submit: false,
-        }
-    }
 }
 
 pub struct GpuHistogram {
@@ -42,7 +22,7 @@ pub struct GpuHistogram {
     params: wgpu::Buffer,
     counters: wgpu::Buffer,
     bindings: Option<(wgpu::TextureView, wgpu::BindGroup)>,
-    slots: [Slot; 2],
+    readback: Readback<Job>,
 }
 impl GpuHistogram {
     pub fn new(device: &wgpu::Device) -> Result<Self> {
@@ -78,13 +58,12 @@ impl GpuHistogram {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let slots = std::array::from_fn(|_| Slot::new(device));
         Ok(Self {
             pipeline,
             params,
             counters,
             bindings: None,
-            slots,
+            readback: Readback::new(device, "Histogram", BYTES),
         })
     }
 
@@ -93,7 +72,7 @@ impl GpuHistogram {
         self.bindings = None;
     }
     pub fn is_pending(&self) -> bool {
-        self.slots.iter().any(|s| s.pending.is_some())
+        self.readback.is_pending()
     }
 
     /// Returns false when both readback slots are busy, leaving the caller free
@@ -115,90 +94,62 @@ impl GpuHistogram {
             groups_x.max(groups_y) <= device.limits().max_compute_workgroups_per_dimension,
             "Histogram exceeds granted compute dispatch limits"
         );
-        let Some(slot) = self.slots.iter_mut().find(|s| s.pending.is_none()) else {
-            return Ok(false);
-        };
-        if slot.replace_on_submit {
-            // A failed/disconnected map has no usable mapped view. Retire that
-            // buffer rather than unmapping an idle buffer or reusing map state.
-            *slot = Slot::new(device);
-        }
-        if self
-            .bindings
-            .as_ref()
-            .is_none_or(|(view, _)| *view != source.view)
-        {
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("histogram source and counters"),
-                layout: &self.pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&source.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.params.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.counters.as_entire_binding(),
-                    },
-                ],
-            });
-            self.bindings = Some((source.view.clone(), group));
-        }
-        queue.write_buffer(
-            &self.params,
-            0,
-            bytemuck::cast_slice(adjustments.uniform_rows()),
-        );
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("histogram dispatch and copy"),
-        });
-        encoder.clear_buffer(&self.counters, 0, None);
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bindings.as_ref().unwrap().1, &[]);
-            pass.dispatch_workgroups(groups_x, groups_y, 1);
-        }
-        encoder.copy_buffer_to_buffer(&self.counters, 0, &slot.buffer, 0, BYTES);
-        queue.submit([encoder.finish()]);
-        let (tx, ready) = mpsc::sync_channel(1);
-        slot.buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
-        slot.pending = Some(Pending {
+        let job = Job {
             generation,
             pixels: u64::from(source.width) * u64::from(source.height),
-            ready,
-        });
-        Ok(true)
+        };
+        Ok(self.readback.submit(device, job, |readback| {
+            if self
+                .bindings
+                .as_ref()
+                .is_none_or(|(view, _)| *view != source.view)
+            {
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("histogram source and counters"),
+                    layout: &self.pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&source.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.params.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.counters.as_entire_binding(),
+                        },
+                    ],
+                });
+                self.bindings = Some((source.view.clone(), group));
+            }
+            queue.write_buffer(
+                &self.params,
+                0,
+                bytemuck::cast_slice(adjustments.uniform_rows()),
+            );
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("histogram dispatch and copy"),
+            });
+            encoder.clear_buffer(&self.counters, 0, None);
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bindings.as_ref().unwrap().1, &[]);
+                pass.dispatch_workgroups(groups_x, groups_y, 1);
+            }
+            encoder.copy_buffer_to_buffer(&self.counters, 0, readback, 0, BYTES);
+            queue.submit([encoder.finish()]);
+        }))
     }
 
     /// Call after the app's ordinary nonblocking device poll. Each returned slot
     /// is unmapped after successful mapping; failed buffers are replaced on the
     /// next submission. Tags let the caller reject superseded results.
     pub fn collect(&mut self) -> Vec<(u64, Result<Histogram>)> {
-        let mut results = Vec::new();
-        for slot in &mut self.slots {
-            let Some(pending) = &slot.pending else {
-                continue;
-            };
-            let mapping = match pending.ready.try_recv() {
-                Err(TryRecvError::Empty) => continue,
-                Err(TryRecvError::Disconnected) => {
-                    Err(anyhow::anyhow!("Histogram mapping callback disconnected"))
-                }
-                Ok(result) => result.context("Histogram mapping failed"),
-            };
-            let pending = slot.pending.take().unwrap();
-            let mapping_succeeded = mapping.is_ok();
-            let result = mapping.and_then(|()| {
-                let mapped = slot.buffer.slice(..).get_mapped_range()?;
+        self.readback
+            .collect(|mapped, job| {
                 let words: Vec<u32> = mapped
                     .as_chunks::<4>()
                     .0
@@ -207,21 +158,14 @@ impl GpuHistogram {
                     .collect();
                 let histogram = Histogram::from_words(&words).map_err(anyhow::Error::msg)?;
                 ensure!(
-                    histogram.total_pixels() == pending.pixels,
+                    histogram.total_pixels() == job.pixels,
                     "Histogram pixel total differs from source"
                 );
                 Ok(histogram)
-            });
-            if mapping_succeeded {
-                slot.buffer.unmap();
-            } else {
-                // unmap() on an unmapped buffer is a wgpu validation error.
-                // A disconnected callback also leaves map state uncertain.
-                slot.replace_on_submit = true;
-            }
-            results.push((pending.generation, result));
-        }
-        results
+            })
+            .into_iter()
+            .map(|(job, result)| (job.generation, result))
+            .collect()
     }
 }
 
