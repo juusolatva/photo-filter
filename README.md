@@ -21,7 +21,7 @@ within a 128 MiB texture-payload budget (excluding driver overhead and in-flight
 Very large visible source regions refine a central subset and retain the proxy elsewhere.
 Tiles survive panning and adjustment changes; each draw uses the current basic settings,
 and results from a previous image are discarded. No full-image GPU texture or region
-readback is required. Spatial filtering and cursor probe remain pending.
+readback is required. Spatial filtering remains pending.
 Below 100%, the area-filtered proxy stays visible to avoid aliasing from minifying
 single-level source tiles; filtered region rendering at intermediate scales remains pending.
 Viewport bilinear interpolation uses explicit float math to avoid adapter-dependent
@@ -42,6 +42,16 @@ exact endpoints. Counts describe the proxy rather than full-resolution export pi
 Older curves are dimmed and marked **Updating…** while the current edit is measured;
 results from superseded edits/images cannot replace current data. Failed readback
 offers **Retry histogram**. See [the histogram contract](docs/histogram.md).
+
+Hover over the image for a **Cursor color** readout below the histogram: source
+pixel coordinates, edited RGB/hex, Oklab and alpha. It measures the original
+full-resolution pixel at every zoom level, so Fit/bilinear screen colors can differ.
+RGB/hex use nearest 8-bit clipped sRGB; Oklab describes the same output color,
+with alpha separate and no checkerboard, flattening or dithering. Transparent
+pixels show no hidden color. Leaving the image clears the reading; older
+cursor/edit/image results are discarded. **Retry color probe** recovers a failed
+readback. Sampling is bounded and asynchronous on the viewer's device.
+See [the cursor probe contract and manual checks](docs/probe.md).
 
 Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
 

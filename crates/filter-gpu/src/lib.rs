@@ -3,6 +3,8 @@ use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments};
 use wgpu::util::DeviceExt;
 
 mod histogram;
+mod probe;
+pub use probe::GpuProbe;
 mod tiled;
 pub use histogram::GpuHistogram;
 pub use tiled::{PendingTile, Tile, TilePlan, TiledExposure};

@@ -3,6 +3,7 @@ mod export;
 mod histogram_ui;
 mod preset_ui;
 mod preview;
+mod probe_ui;
 mod resize;
 use std::sync::Arc;
 
