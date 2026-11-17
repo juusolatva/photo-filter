@@ -196,17 +196,26 @@ impl PhotoApp {
             .wgpu_render_state
             .as_ref()
             .expect("wgpu renderer configured");
+        Self::with_render_state(&cc.egui_ctx, rs, path)
+    }
+    /// Construct against an existing context and device; tests use a headless
+    /// context with a software adapter.
+    fn with_render_state(
+        egui_ctx: &egui::Context,
+        rs: &egui_wgpu::RenderState,
+        path: Option<PathBuf>,
+    ) -> Self {
         let renderer = Arc::new(ExposureRenderer::new(&rs.device, rs.target_format));
         let regions = RegionPreview::new(
             renderer.clone(),
             rs.device.clone(),
             rs.queue.clone(),
-            cc.egui_ctx.clone(),
+            egui_ctx.clone(),
         );
         let (load_tx, jobs) = mpsc::channel::<(u64, PathBuf)>();
         let (results, load_rx) = mpsc::channel();
         let (dialog_tx, dialog_rx) = mpsc::channel();
-        let ctx = cc.egui_ctx.clone();
+        let ctx = egui_ctx.clone();
         let max_edge = 2048.min(rs.device.limits().max_texture_dimension_2d);
         std::thread::spawn(move || {
             while let Ok(mut job) = jobs.recv() {
@@ -786,8 +795,14 @@ impl PhotoApp {
 }
 impl eframe::App for PhotoApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
         let rs = frame.wgpu_render_state().expect("wgpu renderer configured");
+        self.show(ui, rs);
+    }
+}
+impl PhotoApp {
+    /// One frame of the whole window.
+    fn show(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
+        let ctx = ui.ctx().clone();
         while let Ok(result) = self.dialog_rx.try_recv() {
             self.dialog_open = false;
             self.handle_dialog(result, &ctx, rs);
@@ -822,3 +837,7 @@ impl eframe::App for PhotoApp {
         self.schedule_repaint(&ctx);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/app_tests.rs"]
+mod tests;

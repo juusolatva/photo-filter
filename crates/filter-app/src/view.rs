@@ -50,7 +50,7 @@ impl ViewState {
     }
 
     /// Apply this frame's input and place a `source_size` image in `viewport`.
-    /// Returns None, ignoring the input, when the viewport has no area.
+    /// Returns None, ignoring the input, when the viewport has no finite area.
     pub fn place(
         &mut self,
         viewport: egui::Rect,
@@ -59,7 +59,15 @@ impl ViewState {
         input: ViewInput,
     ) -> Option<Placement> {
         let fit = (viewport.width() / source_size.x).min(viewport.height() / source_size.y);
-        if fit <= 0.0 {
+        // Reject empty, NaN or infinite geometry, which would poison zoom and
+        // pan. Inputs are checked directly because f32::min discards a NaN or
+        // infinite operand (e.g. from a zero source dimension).
+        let finite = viewport.is_finite()
+            && source_size.is_finite()
+            && source_size.min_elem() > 0.0
+            && pixels_per_point.is_finite()
+            && pixels_per_point > 0.0;
+        if !finite || !fit.is_finite() || fit <= 0.0 {
             return None;
         }
         let physical_fit = fit * pixels_per_point;

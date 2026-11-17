@@ -183,7 +183,7 @@ fn drag_pans_and_visible_area_is_clipped_to_the_viewport() {
 }
 
 #[test]
-fn an_empty_viewport_places_nothing_and_ignores_input() {
+fn empty_or_non_finite_viewports_place_nothing_and_ignore_input() {
     let mut view = ViewState::default();
     let empty = Rect::from_min_size(pos2(0.0, 0.0), vec2(0.0, 400.0));
     let input = ViewInput {
@@ -193,5 +193,19 @@ fn an_empty_viewport_places_nothing_and_ignores_input() {
         pointer: Some(pos2(1.0, 1.0)),
     };
     assert!(view.place(empty, SOURCE, 1.0, input).is_none());
+    let nan = Rect::from_min_size(pos2(0.0, 0.0), vec2(f32::NAN, 400.0));
+    assert!(view.place(nan, SOURCE, 1.0, input).is_none());
+    let unbounded = Rect::from_min_size(pos2(0.0, 0.0), vec2(f32::INFINITY, f32::INFINITY));
+    assert!(view.place(unbounded, SOURCE, 1.0, input).is_none());
+    let canvas = viewport();
+    for source in [vec2(f32::NAN, 600.0), vec2(0.0, 600.0), vec2(-1.0, -1.0)] {
+        assert!(
+            view.place(canvas, source, 1.0, input).is_none(),
+            "{source:?}"
+        );
+    }
+    for ppp in [0.0, f32::NAN, f32::INFINITY] {
+        assert!(view.place(canvas, SOURCE, ppp, input).is_none(), "{ppp}");
+    }
     assert_eq!(view, ViewState::default());
 }

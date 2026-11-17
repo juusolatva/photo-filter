@@ -114,6 +114,8 @@ cargo test --workspace --locked
 cargo test -p filter-gpu --tests --locked -- --ignored
 # Basic-control and resizing tests for all export formats; needs a software adapter:
 cargo test -p filter-app --locked image_exports_render -- --ignored
+# Headless app shell: whole-window egui frames with queued input; needs a software adapter:
+cargo test -p filter-app --locked app::tests -- --ignored
 # >36MP export regression; requires roughly 800 MiB RAM.
 # Debug builds can take several minutes:
 cargo test -p filter-app --locked large_image_exports -- --ignored --nocapture
@@ -127,7 +129,9 @@ a missing adapter fails the job. Ubuntu installs Mesa lavapipe and selects its V
 ICD; Windows selects DX12 and requests the built-in WARP fallback. Test logs print
 adapter details. Tests honor `WGPU_BACKEND` and continue to reject GL. Dependency
 caches are saved only from `main`, and newer runs cancel superseded runs on the same ref.
-These headless checks do not exercise native window interaction or file dialogs.
+The app-shell tests run whole-window egui frames against a software device with
+synthetic pointer, scroll, drop and dialog-result input. These headless checks do
+not exercise native window interaction, rendering to a surface or file dialogs.
 Software-GPU viewport tests run before the separate large-image regression so
 rendering failures surface without waiting for the 36.6MP exports.
 

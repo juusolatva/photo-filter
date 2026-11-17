@@ -135,34 +135,77 @@ fn histogram_ui_coalesces_edits_and_refreshes_the_reserved_panel() {
             "idle UI must not keep submitting GPU jobs"
         );
 
-        // Paint the same reserved space used above the adjustment controls.
-        let ctx = egui::Context::default();
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            egui::CentralPanel::default().show(ui, |ui| {
-                let reserved = ui
-                    .allocate_exact_size(
-                        egui::vec2(220.0, HistogramUi::HEIGHT),
-                        egui::Sense::hover(),
-                    )
-                    .0;
-                ui.label("Basic adjustments");
-                histogram.show(ui, reserved);
-            });
-        });
-        let text: Vec<_> = output
-            .shapes
-            .iter()
-            .filter_map(|s| {
-                if let egui::Shape::Text(text) = &s.shape {
-                    Some(text.galley.text().to_owned())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        output.drop_without_applying_deltas();
+        let text = rendered_text(&mut histogram);
         assert!(text.iter().any(|s| s == "Histogram"));
         assert!(text.iter().any(|s| s.contains("6 visible pixels")));
         assert!(text.iter().any(|s| s.starts_with("RGB clips:")));
+
+        // Every other state explains why no current histogram is shown.
+        let current = histogram.state.display.clone();
+        histogram.state.error = Some("Histogram mapping failed".into());
+        let text = rendered_text(&mut histogram);
+        assert!(has(&text, "Histogram unavailable"));
+        assert!(
+            has(&text, "Retry histogram"),
+            "a GPU failure can be retried"
+        );
+        histogram.state.error = None;
+        histogram.state.generation += 1; // An edit is still being measured.
+        let text = rendered_text(&mut histogram);
+        assert!(has(&text, "Updating…"));
+        assert!(
+            !text.iter().any(|s| s.starts_with("RGB clips:")),
+            "older counts are hidden while dimmed curves remain"
+        );
+        histogram.state.display = None;
+        histogram.state.settings = None;
+        assert!(has(
+            &rendered_text(&mut histogram),
+            "Unsupported adjustments"
+        ));
+        histogram.has_source = false;
+        assert!(has(&rendered_text(&mut histogram), "Open an image"));
+        histogram.state.display = current;
     });
+}
+
+/// Paint the histogram in the reserved space above the adjustment controls.
+fn rendered_text(histogram: &mut HistogramUi) -> Vec<String> {
+    let ctx = egui::Context::default();
+    let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            let reserved = ui
+                .allocate_exact_size(egui::vec2(220.0, HistogramUi::HEIGHT), egui::Sense::hover())
+                .0;
+            ui.label("Basic adjustments");
+            histogram.show(ui, reserved);
+        });
+    });
+    let text = output
+        .shapes
+        .iter()
+        .filter_map(|s| match &s.shape {
+            egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect();
+    output.drop_without_applying_deltas();
+    text
+}
+fn has(text: &[String], line: &str) -> bool {
+    text.iter().any(|s| s == line)
+}
+
+#[test]
+fn unavailable_gpu_explains_without_offering_retry() {
+    let mut histogram = HistogramUi {
+        gpu: Err("Device limits cannot support the preview histogram".into()),
+        state: HistogramState::default(),
+        has_source: true,
+    };
+    let text = rendered_text(&mut histogram);
+    assert!(has(&text, "Histogram"));
+    assert!(has(&text, "Histogram unavailable"));
+    // Retrying cannot recover a device that lacks the required limits.
+    assert!(!has(&text, "Retry histogram"));
 }
