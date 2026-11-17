@@ -1,5 +1,12 @@
 # Photo Filter Studio
 
+[![CI](https://github.com/juusolatva/photo-filter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/juusolatva/photo-filter/actions/workflows/ci.yml)
+[![Security](https://github.com/juusolatva/photo-filter/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/juusolatva/photo-filter/actions/workflows/security.yml)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=juusolatva_photo-filter&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=juusolatva_photo-filter)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=juusolatva_photo-filter&metric=coverage)](https://sonarcloud.io/summary/new_code?id=juusolatva_photo-filter)
+[![Rust](https://img.shields.io/badge/rust-2024%20edition-orange?logo=rust)](Cargo.toml)
+[![License: MIT](https://img.shields.io/github/license/juusolatva/photo-filter)](LICENSE)
+
 A native Rust photo editor for Linux and Windows, with a Phase 0 viewer/export spike and the Phase 1 edit model and basic pointwise renderer from [the implementation plan](PLAN.md).
 
 For hands-on checks, use the [Linux and Windows test checklist](docs/manual-testing.md).
