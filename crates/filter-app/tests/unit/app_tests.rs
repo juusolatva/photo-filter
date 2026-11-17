@@ -170,6 +170,11 @@ fn loaded_image_supports_zoom_pan_native_pixels_and_probe() {
     );
     assert!(has(&text, "Cursor color · source pixel"));
     assert!(window.app.preview.proxy_scale < 1.0);
+    assert_eq!(
+        window.app.preview.regions.drawn_tiles(),
+        0,
+        "Fit minifies, so only the area-filtered proxy is drawn"
+    );
 
     // Hovering samples the source pixel under the pointer.
     window.events.push(egui::Event::PointerMoved(CANVAS_POINT));
@@ -214,14 +219,22 @@ fn loaded_image_supports_zoom_pan_native_pixels_and_probe() {
     assert!(window.app.view.pan.x > pan.x, "{:?}", window.app.view);
 
     // 100% refines full-resolution tiles over the proxy.
+    assert_eq!(window.app.preview.regions.drawn_tiles(), 0);
     window.app.view.native_pixels = true;
-    for _ in 0..30 {
-        window.frame();
-        let _ = window.rs.device.poll(wgpu::PollType::Poll);
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    window.until("full-resolution tiles", |app| {
+        app.preview.regions.drawn_tiles() > 0 && !app.preview.regions.is_pending()
+    });
     assert!(window.app.view.native_pixels);
     assert!(window.app.preview.regions.error.is_none());
+    // Leaving 100% for Fit draws the proxy alone again; cached tiles keep
+    // their frames, so check that no new tile is requested.
+    let drawn = window.app.preview.regions.drawn_tiles();
+    window.app.view.fit();
+    for _ in 0..5 {
+        window.frame();
+    }
+    assert_eq!(window.app.preview.regions.drawn_tiles(), drawn);
+    assert!(!window.app.preview.regions.is_pending());
 }
 
 #[test]
