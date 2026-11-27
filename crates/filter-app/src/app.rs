@@ -1,5 +1,6 @@
 use crate::export::{ExportFormat, ExportJob, ExportResult};
 use crate::histogram_ui::HistogramUi;
+use crate::history::History;
 use crate::preset_ui::{Action as PresetAction, PresetUi};
 use crate::preview::{PreviewCallback, RegionPreview, needs_regions};
 use crate::probe_ui::{ProbeUi, source_pixel};
@@ -155,6 +156,15 @@ fn bit_depth_selector<T: PartialEq>(ui: &mut egui::Ui, depth: &mut T, eight: T, 
     });
 }
 
+const UNDO: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z);
+const REDO: egui::KeyboardShortcut = egui::KeyboardShortcut::new(
+    egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+    egui::Key::Z,
+);
+const REDO_ALT: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Y);
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum ExportKind {
     #[default]
@@ -178,6 +188,9 @@ pub struct PhotoApp {
     loading: bool,
     status: String,
     edit: EditState,
+    /// Changes not yet settled into `history`, e.g. during a slider drag.
+    edit_dirty: bool,
+    history: History,
     adjustments: Result<BasicAdjustments, ModelError>,
     presets: PresetUi,
     view: ViewState,
@@ -257,6 +270,8 @@ impl PhotoApp {
             loading: false,
             status: "Open a JPEG, PNG, WebP or TIFF to begin".into(),
             edit: EditState::default(),
+            edit_dirty: false,
+            history: History::new(&EditState::default()),
             adjustments: Ok(BasicAdjustments::default()),
             presets: PresetUi::default(),
             view: ViewState::default(),
@@ -284,6 +299,33 @@ impl PhotoApp {
         self.loading = true;
         self.status = format!("Loading {}…", path.display());
         let _ = self.load_tx.send((self.generation, path));
+    }
+    /// Record pending edit changes as one undo step once no pointer button or
+    /// key is held, so a slider drag or a held arrow key settles as one step.
+    fn settle_history(&mut self, ctx: &egui::Context) {
+        let gesture = ctx.input(|i| i.pointer.any_down() || !i.keys_down.is_empty());
+        if self.edit_dirty && !gesture {
+            self.history.commit(&self.edit);
+            self.edit_dirty = false;
+        }
+    }
+    fn can_undo(&self) -> bool {
+        self.history.can_undo() || self.edit_dirty
+    }
+    fn can_redo(&self) -> bool {
+        self.history.can_redo() && !self.edit_dirty
+    }
+    /// Undo or redo, first settling any unrecorded change as its own step.
+    fn step_history(&mut self, redo: bool) {
+        let edit = if redo {
+            self.history.redo(&self.edit)
+        } else {
+            self.history.undo(&self.edit)
+        };
+        self.edit_dirty = false;
+        if let Some(edit) = edit {
+            self.replace_edit(edit);
+        }
     }
     fn load_preset(&mut self, ctx: &egui::Context, path: Option<PathBuf>) {
         if self.dialog_open {
@@ -494,6 +536,8 @@ impl PhotoApp {
         self.source = Some(source);
         self.presets = PresetUi::default();
         self.replace_edit(EditState::default());
+        self.history = History::new(&self.edit);
+        self.edit_dirty = false;
         self.view = ViewState::default();
     }
     /// Dropped presets load; any other dropped file opens as an image.
@@ -517,6 +561,14 @@ impl PhotoApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.dialog(ctx);
         }
+        // Text fields keep their own undo; match Shift+Z before plain Z.
+        if !ctx.text_edit_focused() {
+            if ctx.input_mut(|i| i.consume_shortcut(&REDO) || i.consume_shortcut(&REDO_ALT)) {
+                self.step_history(true);
+            } else if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
+                self.step_history(false);
+            }
+        }
     }
     /// Returns whether 100% was clicked; the canvas applies it after layout.
     fn toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
@@ -527,6 +579,27 @@ impl PhotoApp {
             {
                 self.dialog(ctx);
             }
+            let undo = format!("Undo ({})", ctx.format_shortcut(&UNDO));
+            if ui
+                .add_enabled(self.can_undo(), egui::Button::new("Undo"))
+                .on_hover_text(undo)
+                .clicked()
+            {
+                self.step_history(false);
+            }
+            let redo = format!(
+                "Redo ({} or {})",
+                ctx.format_shortcut(&REDO),
+                ctx.format_shortcut(&REDO_ALT)
+            );
+            if ui
+                .add_enabled(self.can_redo(), egui::Button::new("Redo"))
+                .on_hover_text(redo)
+                .clicked()
+            {
+                self.step_history(true);
+            }
+            ui.separator();
             if ui.button("Fit").clicked() {
                 self.view.fit();
             }
@@ -586,10 +659,12 @@ impl PhotoApp {
         ui.heading("Basic adjustments");
         let mut changed = false;
         ui.add_enabled_ui(self.source.is_some(), |ui| {
+            // Typed values apply once on Enter or focus loss, as one undo step.
             changed |= ui
                 .add(
                     egui::Slider::new(&mut self.edit.calibration.exposure, -5.0..=5.0)
-                        .text("Exposure EV"),
+                        .text("Exposure EV")
+                        .update_while_editing(false),
                 )
                 .changed();
             for (label, value) in [
@@ -605,7 +680,11 @@ impl PhotoApp {
                 ("Saturation", &mut self.edit.color.scalars.saturation),
             ] {
                 changed |= ui
-                    .add(egui::Slider::new(value, -1.0..=1.0).text(label))
+                    .add(
+                        egui::Slider::new(value, -1.0..=1.0)
+                            .text(label)
+                            .update_while_editing(false),
+                    )
                     .changed();
             }
             if ui.button("Reset adjustments").clicked() {
@@ -615,6 +694,7 @@ impl PhotoApp {
         });
         if changed {
             self.adjustments = BasicAdjustments::new(&self.edit);
+            self.edit_dirty = true;
         }
     }
     fn preset_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -622,7 +702,10 @@ impl PhotoApp {
         match self.presets.show(ui, &self.edit, enabled) {
             Some(PresetAction::Load) => self.load_preset(ctx, None),
             Some(PresetAction::Save(preset)) => self.save_preset(ctx, *preset),
-            Some(PresetAction::Apply(edit)) => self.replace_edit(*edit),
+            Some(PresetAction::Apply(edit)) => {
+                self.replace_edit(*edit);
+                self.edit_dirty = true;
+            }
             None => {}
         }
     }
@@ -809,6 +892,9 @@ impl PhotoApp {
         }
         self.poll_export();
         self.poll_loads(rs);
+        // Settle gestures that ended with this frame's input before the
+        // toolbar shows undo state; same-frame changes settle at the end.
+        self.settle_history(&ctx);
         self.handle_shortcuts(&ctx);
         let native_zoom = egui::Panel::top("toolbar")
             .show(ui, |ui| self.toolbar(ui, &ctx))
@@ -833,6 +919,7 @@ impl PhotoApp {
             probe_coordinate,
         );
         self.probe.show(&mut probe_panel);
+        self.settle_history(&ctx);
         let _ = rs.device.poll(wgpu::PollType::Poll);
         self.schedule_repaint(&ctx);
     }

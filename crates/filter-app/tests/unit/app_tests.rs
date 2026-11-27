@@ -82,6 +82,13 @@ impl Window {
     }
     /// Run one frame and return every painted text.
     fn frame(&mut self) -> Vec<String> {
+        self.frame_shapes()
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
+    }
+    /// Run one frame and return painted text with its bounds.
+    fn frame_shapes(&mut self) -> Vec<(String, egui::Rect)> {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
             events: std::mem::take(&mut self.events),
@@ -93,12 +100,52 @@ impl Window {
             .shapes
             .iter()
             .filter_map(|s| match &s.shape {
-                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                egui::Shape::Text(t) => {
+                    Some((t.galley.text().to_owned(), t.visual_bounding_rect()))
+                }
                 _ => None,
             })
             .collect();
         output.drop_without_applying_deltas();
         text
+    }
+    /// Bounds of a painted text, from a fresh frame.
+    fn find(&mut self, line: &str) -> egui::Rect {
+        let shapes = self.frame_shapes();
+        shapes
+            .iter()
+            .find(|(text, _)| text == line)
+            .unwrap_or_else(|| panic!("{line:?} is not painted: {shapes:?}"))
+            .1
+    }
+    fn press(&mut self, pos: egui::Pos2, pressed: bool) {
+        self.events.push(egui::Event::PointerMoved(pos));
+        self.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    fn click(&mut self, line: &str) {
+        let center = self.find(line).center();
+        self.press(center, true);
+        self.frame();
+        self.press(center, false);
+        self.frame();
+    }
+    /// Press and release a shortcut over two frames, as a keyboard would.
+    fn shortcut(&mut self, modifiers: egui::Modifiers, key: egui::Key) {
+        for pressed in [true, false] {
+            self.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            });
+            self.frame();
+        }
     }
     /// Run frames until `done`, giving background decode/export/GPU work time.
     fn until(&mut self, what: &str, mut done: impl FnMut(&PhotoApp) -> bool) -> Vec<String> {
@@ -396,4 +443,90 @@ fn dropped_files_and_side_panel_states_render() {
         window.app.adjustments.is_ok(),
         "a new image resets the edit"
     );
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn slider_drags_presets_and_shortcuts_form_undo_steps() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    let image = dir.join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image.clone()));
+    window.loaded();
+    assert!(!window.app.can_undo() && !window.app.can_redo());
+
+    // The exposure rail starts at the panel's content edge, in the label's row.
+    let left = window.find("Basic adjustments").min.x;
+    let row = window.find("Exposure EV").center().y;
+    let start = egui::pos2(left + 30.0, row);
+    window.press(start, true);
+    window.frame();
+    for step in 1..=5 {
+        window.events.push(egui::Event::PointerMoved(
+            start + egui::vec2(8.0 * step as f32, 0.0),
+        ));
+        window.frame();
+        assert!(
+            window.app.edit_dirty,
+            "a drag in progress is not yet a step"
+        );
+        assert!(!window.app.history.can_undo());
+    }
+    window.press(start + egui::vec2(40.0, 0.0), false);
+    window.frame();
+    let dragged = window.app.edit.calibration.exposure;
+    assert!(dragged != 0.0, "the drag changed exposure");
+    assert!(!window.app.edit_dirty && window.app.history.can_undo());
+
+    // A preset application is another single step.
+    let mut warm = EditState::default();
+    warm.color.scalars.saturation = 0.5;
+    let preset = Preset::capture("Saturated", &warm, &Sections::ALL).unwrap();
+    window.send(DialogResult::PresetLoad {
+        generation: window.app.generation,
+        result: Some(Ok(Box::new(preset))),
+    });
+    window.click("Apply selected sections");
+    assert_eq!(window.app.edit.color.scalars.saturation, 0.5);
+    assert_eq!(window.app.edit.calibration.exposure, 0.0, "full preset");
+
+    // Ctrl+Z walks back one step at a time and refreshes the renderer snapshot.
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit.calibration.exposure, dragged);
+    assert_eq!(window.app.edit.color.scalars.saturation, 0.0);
+    let expected = filter_core::cpu_eval::BasicAdjustments::new(&window.app.edit).unwrap();
+    assert_eq!(
+        format!("{:?}", window.app.adjustments),
+        format!("{:?}", Ok::<_, filter_core::edit::ModelError>(expected))
+    );
+    window.click("Undo");
+    assert_eq!(window.app.edit, EditState::default());
+    assert!(!window.app.can_undo() && window.app.can_redo());
+    // Both redo shortcuts and the Redo button step forward again.
+    window.shortcut(
+        egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+        egui::Key::Z,
+    );
+    assert_eq!(window.app.edit.calibration.exposure, dragged);
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Y);
+    assert_eq!(window.app.edit.color.scalars.saturation, 0.5);
+    window.click("Undo");
+    window.click("Redo");
+    assert_eq!(window.app.edit.color.scalars.saturation, 0.5);
+    assert!(!window.app.can_redo());
+
+    // Reset is undoable too.
+    window.click("Reset adjustments");
+    assert_eq!(window.app.edit, EditState::default());
+    window.click("Undo");
+    assert_eq!(window.app.edit.color.scalars.saturation, 0.5);
+
+    // Opening an image starts a fresh history.
+    window.app.open(image);
+    window.loaded();
+    assert_eq!(window.app.edit, EditState::default());
+    assert!(!window.app.can_undo() && !window.app.can_redo());
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit, EditState::default());
 }

@@ -355,6 +355,34 @@ impl EditState {
         self.color.scalars.saturation = 0.0;
     }
 
+    /// Approximate in-memory size, including curve points, node names and opaque
+    /// operation payloads. Used to bound retained copies such as undo history;
+    /// allocator overhead and spare capacity are not counted.
+    pub fn estimated_bytes(&self) -> usize {
+        let curves = [
+            &self.curves.master,
+            &self.curves.red,
+            &self.curves.green,
+            &self.curves.blue,
+        ]
+        .iter()
+        .map(|curve| std::mem::size_of_val(curve.0.as_slice()))
+        .sum::<usize>();
+        let nodes = self
+            .custom_stack
+            .iter()
+            .map(|node| {
+                std::mem::size_of::<FilterNode>()
+                    + node.name.len()
+                    + match &node.op {
+                        crate::pipeline::FilterOp::Known(_) => 0,
+                        crate::pipeline::FilterOp::Unknown(raw) => json_bytes(raw),
+                    }
+            })
+            .sum::<usize>();
+        std::mem::size_of::<Self>() + curves + nodes
+    }
+
     pub fn validate(&self) -> Result<(), ModelError> {
         if self.crop != CropRect::default() {
             return Err(ModelError("v1 supports only the full-image crop".into()));
@@ -400,4 +428,27 @@ impl EditState {
         }
         Ok(())
     }
+}
+
+/// Heap estimate for an opaque JSON value, walked iteratively so that values
+/// built without serde_json's parse depth limit cannot overflow the stack.
+fn json_bytes(root: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    let mut total = 0;
+    let mut pending = vec![root];
+    while let Some(value) = pending.pop() {
+        total += std::mem::size_of::<Value>();
+        match value {
+            Value::String(text) => total += text.len(),
+            Value::Array(items) => pending.extend(items),
+            Value::Object(map) => {
+                for (key, item) in map {
+                    total += std::mem::size_of::<String>() + key.len();
+                    pending.push(item);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+    total
 }
