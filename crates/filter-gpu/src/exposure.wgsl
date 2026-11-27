@@ -1,6 +1,9 @@
 struct Params { basic: BasicParams, output: vec4<f32>, uv_rect: vec4<f32>, rect: vec4<f32> }
 @group(0) @binding(0) var source: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> viewport: vec4<f32>;
+// Physical framebuffer bounds (origin, size), and the compare split: fragments
+// left of `compare.x` show the unedited source.
+struct Viewport { bounds: vec4<f32>, compare: vec4<f32> }
+@group(0) @binding(1) var<uniform> viewport: Viewport;
 @group(0) @binding(2) var<uniform> params: Params;
 struct VertexOut { @builtin(position) position: vec4<f32> }
 @vertex fn vs_main(@builtin(vertex_index) i: u32) -> VertexOut {
@@ -28,10 +31,14 @@ fn sample_source(uv: vec2<f32>) -> vec4<f32> {
     // Rasterizers quantize quad edges to a subpixel grid. Interpolating UVs
     // over each tile independently turns that quantization into color seams.
     // Derive every draw's sampling coordinates from the same physical viewport.
-    let viewport_uv = (in.position.xy - viewport.xy) / viewport.zw;
+    let viewport_uv = (in.position.xy - viewport.bounds.xy) / viewport.bounds.zw;
     let local_uv = (viewport_uv - params.rect.xy) / params.rect.zw;
     let sample = sample_source(params.uv_rect.xy + local_uv * params.uv_rect.zw);
-    let working = apply_basic(vec4(sample.rgb / max(sample.a,0.000001),sample.a),params.basic).rgb;
+    let straight = vec4(sample.rgb / max(sample.a,0.000001),sample.a);
+    var working = straight.rgb;
+    if (in.position.x >= viewport.compare.x) {
+        working = apply_basic(straight,params.basic).rgb;
+    }
     let rgb = output_linear_srgb(working);
     let checker = select(0.18,0.28, (u32(in.position.x/12.0)+u32(in.position.y/12.0))%2u==0u);
     // Initial spike uses display clipping. Perceptual gamut compression is a later phase.

@@ -1,4 +1,5 @@
 mod app;
+mod compare;
 mod export;
 mod histogram_ui;
 mod history;

@@ -530,3 +530,95 @@ fn slider_drags_presets_and_shortcuts_form_undo_steps() {
     window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
     assert_eq!(window.app.edit, EditState::default());
 }
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn before_after_split_drags_and_space_shows_the_original() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image));
+    window.loaded();
+    assert_eq!(
+        window.app.preview.before_until, 0.0,
+        "edit shown everywhere"
+    );
+
+    window.click("Before/after");
+    let text = window.frame();
+    assert_eq!(window.app.compare.split, Some(0.5));
+    assert!(has(&text, "Before") && has(&text, "After"), "{text:?}");
+    // Headless frames use one physical pixel per point.
+    let divider = window.app.preview.before_until;
+    assert!(divider > 0.0 && divider < SCREEN.x, "{divider}");
+    assert_eq!(divider, divider.round(), "on a physical pixel boundary");
+
+    // Dragging the divider moves the split rather than panning the image.
+    let pan = window.app.view.pan;
+    let start = egui::pos2(divider, CANVAS_POINT.y);
+    window.press(start, true);
+    window.frame();
+    for step in 1..=4 {
+        let pos = start - egui::vec2(25.0 * step as f32, 0.0);
+        window.events.push(egui::Event::PointerMoved(pos));
+        window.frame();
+    }
+    window.press(start - egui::vec2(100.0, 0.0), false);
+    window.frame();
+    assert_eq!(window.app.view.pan, pan);
+    let moved = window.app.preview.before_until;
+    assert!(
+        (moved - (divider - 100.0)).abs() <= 1.0,
+        "{moved} vs {divider}"
+    );
+    assert!(window.app.compare.split.unwrap() < 0.5);
+
+    // Holding Space shows the original everywhere, and its presses do not
+    // click a keyboard-focused button: Tab to Reset adjustments first.
+    let reset = window.find("Reset adjustments").center();
+    let reset_focused = |window: &Window| {
+        window
+            .ctx
+            .memory(|m| m.focused())
+            .and_then(|id| window.ctx.read_response(id))
+            .is_some_and(|response| response.rect.contains(reset))
+    };
+    for _ in 0..80 {
+        if reset_focused(&window) {
+            break;
+        }
+        window.shortcut(egui::Modifiers::NONE, egui::Key::Tab);
+    }
+    assert!(reset_focused(&window), "Tab reaches Reset adjustments");
+    let mut edit = EditState::default();
+    edit.calibration.exposure = 1.0;
+    window.app.replace_edit(edit.clone());
+    let space = |pressed, repeat| egui::Event::Key {
+        key: egui::Key::Space,
+        physical_key: None,
+        pressed,
+        repeat,
+        modifiers: egui::Modifiers::NONE,
+    };
+    window.events.push(space(true, false));
+    let text = window.frame();
+    assert!(window.app.compare.held);
+    assert_eq!(window.app.preview.before_until, f32::MAX);
+    assert!(has(&text, "Before") && !has(&text, "After"), "{text:?}");
+    // Held across frames, including key-repeat presses.
+    window.events.push(space(true, true));
+    window.frame();
+    assert_eq!(window.app.preview.before_until, f32::MAX);
+    window.events.push(space(false, false));
+    window.frame();
+    assert!(!window.app.compare.held);
+    assert_eq!(window.app.preview.before_until, moved);
+    assert_eq!(window.app.edit, edit, "Space did not click Reset");
+    assert!(reset_focused(&window));
+
+    window.click("Before/after");
+    let text = window.frame();
+    assert_eq!(window.app.compare.split, None);
+    assert_eq!(window.app.preview.before_until, 0.0);
+    assert!(!has(&text, "After"));
+}

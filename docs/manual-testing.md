@@ -23,6 +23,14 @@ a transparent PNG, a sharp pixel grid and a photo larger than 36 MP ready.
 - [ ] Pan and zoom; histogram stays unchanged. Edit exposure; curves and clipping counts update.
 - [ ] Hover the histogram; counts appear. During updates, old curves dim and old counts are hidden.
 
+## Before/after
+
+- [ ] Edit exposure and color, then click **Before/after**; the left side shows the original and the right the edit, with matching labels.
+- [ ] Drag the divider across the canvas; the image does not pan, and the line and the image change stay aligned at 100%, Fit and 125%/150% display scaling.
+- [ ] Pan and zoom while split, including at 100% while tiles refine; the divider stays put, with no seams or misaligned columns at the split.
+- [ ] Hold **Space**; the whole canvas shows the original until release. Tab to **Reset adjustments**, then press Space; adjustments are not reset.
+- [ ] Click **Before/after** again; the edit shows everywhere. Histogram, cursor color and exports describe the edit throughout.
+
 ## Undo and redo
 
 - [ ] Drag a slider in several motions without releasing; one **Undo** (or **Ctrl+Z**) returns to the value before the press.

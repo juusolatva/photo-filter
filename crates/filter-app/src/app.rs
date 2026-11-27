@@ -1,3 +1,4 @@
+use crate::compare::Compare;
 use crate::export::{ExportFormat, ExportJob, ExportResult};
 use crate::histogram_ui::HistogramUi;
 use crate::history::History;
@@ -54,6 +55,8 @@ struct Preview {
     updates: ExposureUpdates,
     regions: RegionPreview,
     proxy_scale: f32,
+    /// Physical x left of which the original is shown; see `Compare`.
+    before_until: f32,
 }
 impl Preview {
     /// Upload a new proxy and drop every frame/tile tied to the old image.
@@ -125,6 +128,7 @@ impl Preview {
             renderer: self.renderer.clone(),
             frames,
             viewport: visible,
+            before_until: self.before_until,
         };
         ui.painter()
             .with_clip_rect(viewport)
@@ -194,6 +198,7 @@ pub struct PhotoApp {
     adjustments: Result<BasicAdjustments, ModelError>,
     presets: PresetUi,
     view: ViewState,
+    compare: Compare,
     export: Option<ExportJob>,
     export_status: String,
     export_kind: ExportKind,
@@ -258,6 +263,7 @@ impl PhotoApp {
                 updates: ExposureUpdates::new(&rs.device, &rs.queue),
                 regions,
                 proxy_scale: 1.0,
+                before_until: 0.0,
             },
             histogram: HistogramUi::new(&rs.device),
             probe: ProbeUi::new(&rs.device),
@@ -275,6 +281,7 @@ impl PhotoApp {
             adjustments: Ok(BasicAdjustments::default()),
             presets: PresetUi::default(),
             view: ViewState::default(),
+            compare: Compare::default(),
             export: None,
             export_status: String::new(),
             export_kind: ExportKind::default(),
@@ -561,8 +568,26 @@ impl PhotoApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.dialog(ctx);
         }
+        // Holding Space shows the original. Consuming its presses also keeps
+        // Space from clicking a focused button, such as Reset adjustments.
+        let keys_free = !ctx.text_edit_focused();
+        self.compare.held = keys_free
+            && self.source.is_some()
+            && ctx.input_mut(|i| {
+                i.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Space,
+                            pressed: true,
+                            ..
+                        }
+                    )
+                });
+                i.key_down(egui::Key::Space)
+            });
         // Text fields keep their own undo; match Shift+Z before plain Z.
-        if !ctx.text_edit_focused() {
+        if keys_free {
             if ctx.input_mut(|i| i.consume_shortcut(&REDO) || i.consume_shortcut(&REDO_ALT)) {
                 self.step_history(true);
             } else if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
@@ -607,6 +632,17 @@ impl PhotoApp {
                 .add_enabled(self.source.is_some(), egui::Button::new("100%"))
                 .on_hover_text("One source pixel per physical display pixel")
                 .clicked();
+            let split = self.compare.split.is_some();
+            if ui
+                .add_enabled(
+                    self.source.is_some(),
+                    egui::Button::selectable(split, "Before/after"),
+                )
+                .on_hover_text("Split view with a draggable divider · hold Space for the original")
+                .clicked()
+            {
+                self.compare.split = (!split).then_some(Compare::DEFAULT_SPLIT);
+            }
             ui.label("Scroll to zoom · drag to pan");
             if self.loading {
                 ui.spinner();
@@ -846,6 +882,8 @@ impl PhotoApp {
             );
             return None;
         };
+        // Registered above the canvas, so dragging the divider does not pan.
+        self.compare.interact(ui, viewport);
         let size = [source.buffer.width(), source.buffer.height()];
         let input = ViewInput {
             native_zoom,
@@ -863,8 +901,10 @@ impl PhotoApp {
             ctx.pixels_per_point(),
             input,
         )?;
+        self.preview.before_until = self.compare.before_until(viewport, ctx.pixels_per_point());
         self.preview
             .paint(ui, device, viewport, placement, source, adjustments);
+        self.compare.paint(ui, viewport);
         source_pixel(response.hover_pos(), viewport, placement.image, size)
     }
     fn schedule_repaint(&self, ctx: &egui::Context) {
