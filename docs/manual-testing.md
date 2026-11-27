@@ -23,6 +23,15 @@ a transparent PNG, a sharp pixel grid and a photo larger than 36 MP ready.
 - [ ] Pan and zoom; histogram stays unchanged. Edit exposure; curves and clipping counts update.
 - [ ] Hover the histogram; counts appear. During updates, old curves dim and old counts are hidden.
 
+## Undo and redo
+
+- [ ] Drag a slider in several motions without releasing; one **Undo** (or **Ctrl+Z**) returns to the value before the press.
+- [ ] Type a slider value and press Enter; one undo restores the previous value. While typing, **Ctrl+Z** edits the text instead.
+- [ ] Hold an arrow key on a focused slider, then release; the whole held change undoes as one step.
+- [ ] Apply a preset and click **Reset adjustments**; each undoes separately. **Redo**, **Ctrl+Shift+Z** and **Ctrl+Y** step forward again.
+- [ ] Undo, then move a slider; **Redo** becomes unavailable. Open another image; Undo and Redo start unavailable.
+- [ ] Undo/redo during an export; the export keeps the settings it captured.
+
 ## Cursor color probe
 
 The readout is **Cursor color**, below the histogram. It measures one original

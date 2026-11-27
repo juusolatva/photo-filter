@@ -60,6 +60,15 @@ cursor/edit/image results are discarded. **Retry color probe** recovers a failed
 readback. Sampling is bounded and asynchronous on the viewer's device.
 See [the cursor probe contract and manual checks](docs/probe.md).
 
+**Undo** and **Redo** in the toolbar (**Ctrl+Z**, and **Ctrl+Shift+Z** or **Ctrl+Y**)
+step through whole-edit history. A slider drag, a held key or a typed slider value
+(applied on Enter or focus loss) is one step; preset application and **Reset adjustments**
+are also steps. Changes settle once no pointer button or key is held. While a text field
+has focus, the shortcuts are left to the field. Undo during an unfinished drag first
+records it, so redo can return to it. Opening an image clears history. History keeps at most
+100 steps and about 64 MiB of estimated edit data (relevant only for presets with large
+unknown future filters), dropping the oldest first. Exports keep the settings they captured.
+
 Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
 
 Choose **PNG**, **JPEG**, **WebP**, or **TIFF** under **Format**, choose **Full**, **Long edge**, or **Percentage** under **Size**, then **Export…**.

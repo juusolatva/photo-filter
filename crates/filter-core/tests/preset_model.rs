@@ -427,3 +427,47 @@ fn preset_input_byte_limit_is_checked_before_parsing() {
     let error = Preset::from_json(&at_limit).unwrap_err();
     assert!(error.to_string().contains("bytes"));
 }
+
+#[test]
+fn estimated_bytes_count_curves_names_and_opaque_payloads() {
+    let neutral = EditState::default();
+    let base = neutral.estimated_bytes();
+    assert!(base >= std::mem::size_of::<EditState>());
+
+    let mut curved = neutral.clone();
+    curved.curves.red.0 = (0..1024)
+        .map(|i| [i as f32 / 1023.0, i as f32 / 1023.0])
+        .collect();
+    assert_eq!(curved.estimated_bytes(), base + 1022 * 8);
+
+    let preset = Preset::from_json(FUTURE_NODE).unwrap();
+    let mut node = preset.patch.custom_stack.as_ref().unwrap()[0].clone();
+    let FilterOp::Unknown(raw) = &mut node.op else {
+        panic!("fixture node should be opaque");
+    };
+    raw["payload"] = json!("x".repeat(1 << 20));
+    node.name = "n".repeat(100);
+    let mut stacked = neutral.clone();
+    stacked.custom_stack.push(node);
+    let extra = stacked.estimated_bytes() - base;
+    assert!(extra > (1 << 20) + 100, "{extra}");
+    assert!(extra < (1 << 20) + 4096, "{extra}");
+
+    // Deep values built in memory are walked without recursion.
+    const DEPTH: usize = 100_000;
+    let mut deep = json!(null);
+    for _ in 0..DEPTH {
+        deep = Value::Array(vec![deep]);
+    }
+    let FilterOp::Unknown(raw) = &mut stacked.custom_stack[0].op else {
+        unreachable!();
+    };
+    // `json!` would serialize (and recurse into) an interpolated value.
+    *raw = Value::Object(serde_json::Map::from_iter([
+        ("type".to_owned(), json!("Deep")),
+        ("value".to_owned(), deep),
+    ]));
+    assert!(stacked.estimated_bytes() > base + DEPTH * std::mem::size_of::<Value>());
+    // Dropping a deeply nested serde_json value recurses, so leak it in the test.
+    std::mem::forget(stacked);
+}
