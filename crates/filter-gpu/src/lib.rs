@@ -153,9 +153,10 @@ impl ExposureRenderer {
             multiview_mask: None,
             cache: None,
         });
+        // Physical bounds, then the before/after split (0: edited everywhere).
         let viewport = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("viewport physical bounds"),
-            contents: bytemuck::cast_slice(&[0.0_f32, 0.0, 1.0, 1.0]),
+            label: Some("viewport physical bounds and compare split"),
+            contents: bytemuck::cast_slice(&[0.0_f32, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         Self {
@@ -170,6 +171,21 @@ impl ExposureRenderer {
     pub fn set_viewport(&self, queue: &wgpu::Queue, bounds: [f32; 4]) {
         assert!(bounds.iter().all(|v| v.is_finite()) && bounds[2] > 0.0 && bounds[3] > 0.0);
         queue.write_buffer(&self.viewport, 0, bytemuck::cast_slice(&bounds));
+    }
+    /// Before/after comparison for all frames of this renderer: fragments whose
+    /// physical framebuffer x lies left of `x` show the unedited source, without
+    /// basic adjustments. `0.0` (the default) shows the edit everywhere; a value
+    /// beyond the target's right edge, such as `f32::MAX`, shows only the original.
+    ///
+    /// # Panics
+    /// Panics if `x` is not finite.
+    pub fn set_before_until(&self, queue: &wgpu::Queue, x: f32) {
+        assert!(x.is_finite(), "compare split must be finite");
+        queue.write_buffer(
+            &self.viewport,
+            16,
+            bytemuck::cast_slice(&[x, 0.0, 0.0, 0.0]),
+        );
     }
     pub fn upload(
         &self,

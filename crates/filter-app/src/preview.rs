@@ -8,6 +8,8 @@ pub struct PreviewCallback {
     pub renderer: Arc<ExposureRenderer>,
     pub frames: Vec<ExposureFrame>,
     pub viewport: egui::Rect,
+    /// Physical x left of which the original is shown; see `Compare`.
+    pub before_until: f32,
 }
 impl egui_wgpu::CallbackTrait for PreviewCallback {
     fn prepare(
@@ -36,6 +38,7 @@ impl egui_wgpu::CallbackTrait for PreviewCallback {
                 ],
             );
         }
+        self.renderer.set_before_until(queue, self.before_until);
         Vec::new()
     }
     fn paint(

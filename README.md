@@ -60,6 +60,13 @@ cursor/edit/image results are discarded. **Retry color probe** recovers a failed
 readback. Sampling is bounded and asynchronous on the viewer's device.
 See [the cursor probe contract and manual checks](docs/probe.md).
 
+**Before/after** in the toolbar splits the canvas: the unedited source is left of a
+draggable divider and the edit is to its right. The divider stays at its place on the
+canvas while you pan and zoom, and refined full-resolution tiles split exactly like the
+proxy. Hold **Space** to show the original across the whole canvas. Holding Space also
+stops it from clicking a keyboard-focused button, but has no effect while a text field
+has focus. The histogram, cursor color and export always describe the edited image.
+
 **Undo** and **Redo** in the toolbar (**Ctrl+Z**, and **Ctrl+Shift+Z** or **Ctrl+Y**)
 step through whole-edit history. A slider drag, a held key or a typed slider value
 (applied on Enter or focus loss) is one step; preset application and **Reset adjustments**

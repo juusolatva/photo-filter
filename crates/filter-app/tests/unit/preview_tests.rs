@@ -548,6 +548,48 @@ fn check_tiles_match_untiled_across_pans_and_edits(
     assert!(!regions.pending);
 }
 
+/// The compare split shows unedited source pixels left of a physical x
+/// coordinate in tiled and untiled frames alike, with the edit to its right.
+fn check_compare_split(
+    gpu: &Harness,
+    regions: &mut RegionPreview,
+    updates: &mut ExposureUpdates,
+    image: &Arc<DecodedImage>,
+) {
+    let texture = gpu.renderer.upload(&gpu.device, &gpu.queue, &image.buffer);
+    let full = rect(0.0, 0.0, 67.0, 37.0);
+    let (size, origin) = ((67, 37), (7, 9));
+    let neutral = BasicAdjustments::default();
+    let edited = BasicAdjustments::exposure(1.25).unwrap();
+    let before_frames = gpu.refined(regions, updates, image, full, &neutral);
+    let before = gpu.render(size, origin, &before_frames);
+    let edited_frames = gpu.refined(regions, updates, image, full, &edited);
+    let after = gpu.render(size, origin, &edited_frames);
+    assert_ne!(before, after, "the edit must be visible");
+    let row = size.0 as usize * 4;
+    // 30 image columns lie left of the split at physical x = origin + 30.
+    let split = 30 * 4;
+    gpu.renderer
+        .set_before_until(&gpu.queue, (origin.0 + 30) as f32);
+    let untiled = gpu.untiled(&texture, image, full, &edited);
+    for (name, frames) in [("tiled", edited_frames.as_slice()), ("untiled", &[untiled])] {
+        let shown = gpu.render(size, origin, frames);
+        for y in 0..size.1 as usize {
+            let line = y * row..(y + 1) * row;
+            let (left, right) = shown[line.clone()].split_at(split);
+            let context = format!("{:?} {name} row {y}", gpu.format);
+            assert_bytes_close(left, &before[line.start..line.start + split], &context);
+            assert_bytes_close(right, &after[line.start + split..line.end], &context);
+        }
+    }
+    gpu.renderer.set_before_until(&gpu.queue, f32::MAX);
+    let original = gpu.render(size, origin, &edited_frames);
+    assert_bytes_close(&original, &before, "whole original");
+    assert_native_pixels(image, &neutral, &original, (7, 9));
+    gpu.renderer.set_before_until(&gpu.queue, 0.0);
+    assert_eq!(gpu.render(size, origin, &edited_frames), after);
+}
+
 /// Views larger than the cache evict tiles and keep a stable working set.
 fn check_cache_stays_bounded(
     gpu: &Harness,
@@ -658,6 +700,7 @@ fn full_resolution_regions_match_untiled_and_reject_stale_uploads() {
         check_stale_source_is_discarded(&gpu, &mut regions, &mut updates);
         let image = source(67, 37, true);
         check_tiles_match_untiled_across_pans_and_edits(&gpu, &mut regions, &mut updates, &image);
+        check_compare_split(&gpu, &mut regions, &mut updates, &image);
         let large = source(257, 257, false);
         check_cache_stays_bounded(&gpu, &mut regions, &mut updates, &large);
         check_texture_limited_tiles(&gpu, &limited, &large);
