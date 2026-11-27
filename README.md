@@ -65,9 +65,42 @@ to add a point, drag a point to move it, and double-click or right-click a point
 remove it. Endpoints move only vertically, and points keep their order. The readout
 shows the hovered or dragged point as input → output on a 0–255 scale. **Reset curve**
 restores the selected channel. Curves apply after the basic tone controls and before
-vibrance/saturation, as smooth curves that do not overshoot their points. Each drag
+the HSL mixer, vibrance/saturation and grading, as smooth curves that do not overshoot their points. Each drag
 or click is one undo step. Preview, histogram, cursor color and export all include
 the curves. See [tone curves](docs/pointwise.md#tone-curves) for the exact domain.
+
+Expand **Color mixer (HSL)** to shift, saturate or lighten eight color bands (red,
+orange, yellow, green, aqua, blue, purple, magenta). Choose the **Hue**,
+**Saturation** or **Luminance** tab, or **All**. Sliders show −100 to +100; the hue
+slider at full scale rotates a band by up to 30° of OkLCh hue, saturation −100 removes a
+band's chroma and +100 doubles it, and luminance ±100 scales its lightness by about ±1.5
+stops. Double-click a slider to zero it; **Reset hue/saturation/luminance** zeroes one
+channel of all bands and **Reset HSL** zeroes everything. Each drag or reset is one undo
+step. The mixer runs after the curves and before vibrance/saturation. It leaves
+near-neutral colors alone (chroma below about 0.005 is untouched and fades in by
+0.04), and neighboring bands blend smoothly. Adjacent bands with strongly opposed hue
+shifts compress the hues between them. See
+[the HSL mixer](docs/pointwise.md#hsl-mixer) for the algorithm.
+
+Expand **Channel mixer** to remix the red, green and blue channels or convert to black
+and white. Unchecked, **Monochrome** shows a 3x3 grid of output-channel rows in linear
+sRGB, as percent of each input channel, with a sum per row (flagged when not about 100%,
+which would shift neutral grays), **Normalize rows** and **Reset channel mixer**. Checking
+**Monochrome** outputs the luminance of the mixed color: three gray-weight sliders
+replace the grid, with preset buttons for Luminance, Panchromatic, Orthochromatic and
+yellow, orange, red and green filters. Unchecking Monochrome while all three rows are equal
+(a preset or slider edit) also resets the matrix to the identity, as one undo step. The mixer
+runs right after exposure and white balance, before tone. HSL does not affect a pure mono
+image; grading still tints it. See
+[the channel mixer](docs/pointwise.md#channel-mixer-and-monochrome).
+
+Expand **Color grading** for shadows, midtones and highlights tints. Choose a wheel tab,
+then set **Hue** (0–360° of OkLCh hue), **Chroma** and **Lightness**; **Balance** moves the
+pivot between shadows and highlights (positive grows highlights). Hue and Balance alone do
+nothing: a wheel acts once its chroma or lightness is nonzero. Grading runs last, so it
+still tints when Saturation is −100, and it tints neutral grays. **Reset shadows/midtones/
+highlights** and **Reset grading** are one undo step each. See
+[color grading](docs/pointwise.md#color-grading) for the masks and constants.
 
 **Before/after** in the toolbar splits the canvas: the unedited source is left of a
 draggable divider and the edit is to its right. The divider stays at its place on the
@@ -211,7 +244,7 @@ source replacement and device/source limits. The app's headless UI test checks e
 coalescing, idle behavior and reserved-panel rendering; ordinary tests reject stale
 image/edit results and cover retry, bins, luminance and clipping semantics.
 
-Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Tone curves render too; detail, grading and custom nodes remain pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
+Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Tone curves, the HSL mixer, color grading, the channel mixer and monochrome render too; detail, defringe and custom nodes remain pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
 
 The workspace separates reusable image/color primitives (`filter-core`), device-sharing GPU rendering (`filter-gpu`), decoding and metadata (`filter-io`), and the desktop UI (`filter-app`). Neither the core, GPU, nor I/O crates depend on egui.
 

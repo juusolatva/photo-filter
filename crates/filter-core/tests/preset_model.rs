@@ -486,3 +486,116 @@ fn curve_y_coordinates_are_limited_for_rendering() {
         assert_eq!(edit.validate().is_ok(), valid, "{y}");
     }
 }
+
+#[test]
+fn film_look_fixture_round_trips_renders_and_applies_selectively() {
+    use filter_core::cpu_eval::BasicAdjustments;
+    const FILM_LOOK: &str = include_str!("fixtures/film_look.pfpreset.json");
+    let preset = Preset::from_json(FILM_LOOK).unwrap();
+    assert_eq!(
+        Preset::from_json(&preset.to_json().unwrap()).unwrap(),
+        preset
+    );
+    let mut edit = EditState::default();
+    preset.apply_to(&mut edit, &Sections::ALL).unwrap();
+    assert_eq!(edit.color.hsl[3].saturation, -0.45);
+    assert_eq!(edit.color.hsl[0], HslBand::default(), "null leaves a band");
+    assert_eq!(edit.color.grading[2].hue, 0.17);
+    assert_eq!(edit.color.grading[1], GradingWheel::default());
+    assert_eq!(edit.color.scalars.grading_balance, 0.1);
+    let rows = *BasicAdjustments::new(&edit).unwrap().uniform_rows();
+    assert_eq!([rows[15][0], rows[15][1], rows[15][2]], [1.0, 1.0, 1.0]);
+
+    // Capture and reapply restores every band and wheel.
+    let captured = Preset::capture("copy", &edit, &Sections::ALL).unwrap();
+    let mut restored = EditState::default();
+    captured.apply_to(&mut restored, &Sections::ALL).unwrap();
+    assert_eq!(restored.color, edit.color);
+
+    // Present bands and wheels replace; omitted ones keep the existing values.
+    let mut other = EditState::default();
+    other.color.hsl[0].lightness = 0.5;
+    other.color.hsl[3].hue = 0.9;
+    other.color.grading[1].chroma = 0.6;
+    other.color.grading[2].lightness = 0.7;
+    other.color.scalars.vibrance = 0.3;
+    preset.apply_to(&mut other, &Sections::ALL).unwrap();
+    assert_eq!(other.color.hsl[0].lightness, 0.5);
+    assert_eq!(other.color.hsl[3], edit.color.hsl[3], "whole band replaced");
+    assert_eq!(other.color.grading[1].chroma, 0.6);
+    assert_eq!(other.color.grading[2], edit.color.grading[2]);
+    assert_eq!(other.color.scalars.vibrance, 0.3);
+
+    // With the color section deselected nothing in it changes.
+    let mut untouched = EditState::default();
+    let sections = Sections {
+        color: false,
+        ..Sections::ALL
+    };
+    preset.apply_to(&mut untouched, &sections).unwrap();
+    assert_eq!(untouched.color, Default::default());
+    assert_eq!(untouched.tone.contrast, 0.1);
+}
+
+#[test]
+fn out_of_range_grading_is_rejected_by_presets() {
+    for raw in [
+        json!({"color":{"grading":[{"chroma":1.5},null,null]}}),
+        json!({"color":{"grading":[null,{"hue":1.2},null]}}),
+        json!({"color":{"grading_balance":-1.5}}),
+    ] {
+        let mut edit = EditState::default();
+        assert!(edit.apply(&patch(raw), &Sections::ALL).is_err());
+        assert_eq!(edit, EditState::default());
+    }
+}
+
+#[test]
+fn mono_fixture_round_trips_renders_gray_and_applies_selectively() {
+    use filter_core::cpu_eval::BasicAdjustments;
+    const MONO: &str = include_str!("fixtures/film_look_mono.pfpreset.json");
+    let preset = Preset::from_json(MONO).unwrap();
+    assert_eq!(
+        Preset::from_json(&preset.to_json().unwrap()).unwrap(),
+        preset
+    );
+    let mut edit = EditState::default();
+    preset.apply_to(&mut edit, &Sections::ALL).unwrap();
+    assert!(edit.color.scalars.monochrome);
+    assert_eq!(edit.color.scalars.channel_mixer, [[0.62, 0.35, 0.03]; 3]);
+    let captured = Preset::capture("copy", &edit, &Sections::ALL).unwrap();
+    let mut restored = EditState::default();
+    captured.apply_to(&mut restored, &Sections::ALL).unwrap();
+    assert_eq!(restored.color, edit.color);
+
+    // Without grading wheels the render is exactly gray; the preset's grading
+    // is what tints it.
+    let mut plain = edit.clone();
+    plain.reset_grading();
+    let gray = BasicAdjustments::new(&plain)
+        .unwrap()
+        .pixel([0.7, 0.2, 0.1, 1.0]);
+    // Contrast runs through Oklab, so equality holds to a few ulps.
+    assert!((gray[0] - gray[1]).abs() < 4e-6 && (gray[1] - gray[2]).abs() < 4e-6);
+    let toned = BasicAdjustments::new(&edit)
+        .unwrap()
+        .pixel([0.5, 0.5, 0.5, 1.0]);
+    assert!(toned[0] != toned[2]);
+
+    // Deselecting the color section leaves the mixer untouched.
+    let mut untouched = EditState::default();
+    let sections = Sections {
+        color: false,
+        ..Sections::ALL
+    };
+    preset.apply_to(&mut untouched, &sections).unwrap();
+    assert_eq!(untouched.color, Default::default());
+}
+
+#[test]
+fn out_of_range_mixer_is_rejected_by_presets() {
+    let mut edit = EditState::default();
+    let raw = json!({"color":{"channel_mixer":[[2.5,0,0],[0,1,0],[0,0,1]]}});
+    assert!(edit.apply(&patch(raw), &Sections::ALL).is_err());
+    assert_eq!(edit, EditState::default());
+}

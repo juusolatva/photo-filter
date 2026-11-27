@@ -1,12 +1,15 @@
 mod app;
+mod channel_ui;
 mod clipping;
 mod compare;
 mod curve_ui;
 mod export;
 mod eyedropper;
+mod grading_ui;
 mod histogram_ui;
 mod history;
 mod keys;
+mod mixer_ui;
 mod preset_ui;
 mod preview;
 mod probe_ui;

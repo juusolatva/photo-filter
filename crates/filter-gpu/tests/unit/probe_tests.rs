@@ -81,6 +81,13 @@ fn source_probe_matches_cpu_bounds_jobs_and_recovers_failed_maps() {
     let mixed = BasicAdjustments::new(&edit).unwrap();
     edit.curves.master.0 = vec![[0.0, 0.1], [0.5, 0.7], [1.0, 0.95]];
     edit.curves.green.0 = vec![[0.0, 0.0], [1.0, 0.6]];
+    edit.color.hsl[0].saturation = -0.6;
+    edit.color.hsl[3].hue = 0.8;
+    edit.color.hsl[5].lightness = -0.5;
+    edit.color.grading[1].chroma = 0.6;
+    edit.color.grading[1].hue = 0.6;
+    edit.color.grading[0].lightness = 0.5;
+    edit.color.scalars.channel_mixer = [[1.2, -0.1, -0.1], [0.1, 0.9, 0.0], [-0.1, 0.2, 0.9]];
     let curved = BasicAdjustments::new(&edit).unwrap();
     let settings = [
         neutral.clone(),

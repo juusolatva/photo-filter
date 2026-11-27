@@ -1,5 +1,9 @@
 //! GUI-independent basic pointwise GPU renderer. Uses the caller's device and queue.
-use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments, curve};
+use filter_core::{
+    ImageBuffer,
+    cpu_eval::{BASIC_ROWS, BasicAdjustments},
+    curve,
+};
 use wgpu::util::DeviceExt;
 
 mod histogram;
@@ -84,7 +88,7 @@ impl ExposureUpdates {
             encoder: None,
         }
     }
-    fn write(&mut self, target: &wgpu::Buffer, params: &[[f32; 4]; 9]) {
+    fn write(&mut self, target: &wgpu::Buffer, params: &[[f32; 4]; BASIC_ROWS + 3]) {
         let encoder = self.encoder.get_or_insert_with(|| {
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -435,12 +439,12 @@ impl ExposureRenderer {
         adjustments: &BasicAdjustments,
         uv: [f32; 4],
         rect: [f32; 4],
-    ) -> [[f32; 4]; 9] {
-        let mut params = [[0.0; 4]; 9];
-        params[..6].copy_from_slice(adjustments.uniform_rows());
-        params[6][0] = if self.target_is_srgb { 1.0 } else { 0.0 };
-        params[7] = uv;
-        params[8] = rect;
+    ) -> [[f32; 4]; BASIC_ROWS + 3] {
+        let mut params = [[0.0; 4]; BASIC_ROWS + 3];
+        params[..BASIC_ROWS].copy_from_slice(adjustments.uniform_rows());
+        params[BASIC_ROWS][0] = if self.target_is_srgb { 1.0 } else { 0.0 };
+        params[BASIC_ROWS + 1] = uv;
+        params[BASIC_ROWS + 2] = rect;
         params
     }
     pub fn paint(&self, pass: &mut wgpu::RenderPass<'_>, frame: &ExposureFrame) {

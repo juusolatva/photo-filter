@@ -1,10 +1,13 @@
+use crate::channel_ui::ChannelUi;
 use crate::clipping::{self, ClippingOverlay};
 use crate::compare::Compare;
 use crate::curve_ui::CurveUi;
 use crate::export::{ExportFormat, ExportJob, ExportResult};
 use crate::eyedropper::Eyedropper;
+use crate::grading_ui::GradingUi;
 use crate::histogram_ui::HistogramUi;
 use crate::history::History;
+use crate::mixer_ui::MixerUi;
 use crate::preset_ui::{Action as PresetAction, PresetUi};
 use crate::preview::{PreviewCallback, RegionPreview, needs_regions};
 use crate::probe_ui::{ProbeUi, source_pixel};
@@ -38,7 +41,7 @@ enum DialogResult {
         result: Option<Result<Box<Preset>, String>>,
     },
     PresetSave(Option<Result<PathBuf, String>>),
-    Export(ExportRequest),
+    Export(Box<ExportRequest>),
 }
 
 /// Export settings captured when the save dialog opened; no path = cancelled.
@@ -205,6 +208,12 @@ pub struct PhotoApp {
     adjustments: Result<BasicAdjustments, ModelError>,
     presets: PresetUi,
     curve_ui: CurveUi,
+    /// Selected mixer tab; not part of the edit.
+    mixer_ui: MixerUi,
+    /// Selected grading wheel tab; not part of the edit.
+    grading_ui: GradingUi,
+    /// Channel mixer panel; stateless, kept for symmetry with the other sections.
+    channel_ui: ChannelUi,
     view: ViewState,
     compare: Compare,
     /// Transient white-balance picker; not part of the edit.
@@ -294,6 +303,9 @@ impl PhotoApp {
             adjustments: Ok(BasicAdjustments::default()),
             presets: PresetUi::default(),
             curve_ui: CurveUi::default(),
+            mixer_ui: MixerUi::default(),
+            grading_ui: GradingUi::default(),
+            channel_ui: ChannelUi,
             view: ViewState::default(),
             compare: Compare::default(),
             eyedropper: Eyedropper::default(),
@@ -456,13 +468,13 @@ impl PhotoApp {
                 .add_filter(format.label(), extensions)
                 .set_file_name(format!("edited.{}", format.extension()))
                 .save_file();
-            let _ = tx.send(DialogResult::Export(ExportRequest {
+            let _ = tx.send(DialogResult::Export(Box::new(ExportRequest {
                 path,
                 source,
                 adjustments,
                 format,
                 resize,
-            }));
+            })));
             ctx.request_repaint();
         });
     }
@@ -486,7 +498,7 @@ impl PhotoApp {
                     None => "Preset saving cancelled".into(),
                 };
             }
-            DialogResult::Export(request) => self.start_export(request, ctx, rs),
+            DialogResult::Export(request) => self.start_export(*request, ctx, rs),
         }
     }
     fn start_export(
@@ -698,6 +710,12 @@ impl PhotoApp {
         ui.separator();
         self.adjustment_controls(ui);
         ui.separator();
+        self.mixer_controls(ui);
+        ui.separator();
+        self.grading_controls(ui);
+        ui.separator();
+        self.channel_controls(ui);
+        ui.separator();
         self.curve_controls(ui);
         ui.separator();
         self.preset_controls(ui, ctx);
@@ -752,6 +770,39 @@ impl PhotoApp {
                 self.edit.reset_basic();
                 changed = true;
             }
+        });
+        if changed {
+            self.edit_changed();
+        }
+    }
+    fn mixer_controls(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        egui::CollapsingHeader::new("Color mixer (HSL)").show(ui, |ui| {
+            ui.add_enabled_ui(self.source.is_some(), |ui| {
+                changed = self.mixer_ui.show(ui, &mut self.edit.color);
+            });
+        });
+        if changed {
+            self.edit_changed();
+        }
+    }
+    fn grading_controls(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        egui::CollapsingHeader::new("Color grading").show(ui, |ui| {
+            ui.add_enabled_ui(self.source.is_some(), |ui| {
+                changed = self.grading_ui.show(ui, &mut self.edit.color);
+            });
+        });
+        if changed {
+            self.edit_changed();
+        }
+    }
+    fn channel_controls(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        egui::CollapsingHeader::new("Channel mixer").show(ui, |ui| {
+            ui.add_enabled_ui(self.source.is_some(), |ui| {
+                changed = self.channel_ui.show(ui, &mut self.edit.color.scalars);
+            });
         });
         if changed {
             self.edit_changed();

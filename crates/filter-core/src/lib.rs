@@ -3,6 +3,7 @@ pub mod buffer;
 pub mod color;
 pub mod curve;
 pub mod edit;
+pub mod grading;
 pub mod histogram;
 pub mod pipeline;
 pub mod preset;

@@ -3,7 +3,7 @@ use filter_core::{
     ImageBuffer,
     cpu_eval::BasicAdjustments,
     curve,
-    edit::{Curve, EditState},
+    edit::{Curve, EditState, GradingWheel, HslBand},
 };
 use filter_gpu::{TilePlan, TiledExposure};
 use half::f16;
@@ -47,6 +47,9 @@ fn snapshots() -> Vec<BasicAdjustments> {
         edits.push(e);
     }
     edits.extend(curve_edits());
+    edits.extend(hsl_edits());
+    edits.extend(grading_edits());
+    edits.extend(mixer_edits());
     edits
         .iter()
         .map(|e| BasicAdjustments::new(e).unwrap())
@@ -75,6 +78,214 @@ fn curve_edits() -> Vec<EditState> {
     color_only.color.scalars.saturation = 0.5;
     vec![s_curve, channels, extended, combined, color_only]
 }
+/// Deterministic values in [-1, 1].
+fn lcg(state: &mut u32) -> f32 {
+    *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    (*state >> 8) as f32 / (1 << 23) as f32 - 1.0
+}
+/// HSL mixer alone, per band, all bands random, and stacked with tone, curves,
+/// vibrance and saturation.
+fn hsl_edits() -> Vec<EditState> {
+    let mut edits = Vec::new();
+    for band in 0..8 {
+        let mut e = EditState::default();
+        e.color.hsl[band] = HslBand {
+            hue: 0.9,
+            saturation: if band % 2 == 0 { 0.6 } else { -1.0 },
+            lightness: if band % 3 == 0 { -0.7 } else { 1.0 },
+        };
+        edits.push(e);
+    }
+    for seed in 1..=3 {
+        let mut state = seed * 7919;
+        let mut e = EditState::default();
+        for band in &mut e.color.hsl {
+            *band = HslBand {
+                hue: lcg(&mut state),
+                saturation: lcg(&mut state),
+                lightness: lcg(&mut state),
+            };
+        }
+        edits.push(e);
+    }
+    let mut stacked = edits[8].clone();
+    stacked.calibration.exposure = 0.5;
+    stacked.calibration.temperature = 0.3;
+    stacked.tone.contrast = 0.5;
+    stacked.tone.shadows = 0.4;
+    stacked.color.scalars.vibrance = 0.5;
+    stacked.color.scalars.saturation = -0.3;
+    let mut curved = stacked.clone();
+    curved.curves = curve_edits().remove(3).curves;
+    // HSL on its own with curves, without tone or vibrance/saturation.
+    let mut curved_only = edits[9].clone();
+    curved_only.curves = curved.curves.clone();
+    edits.extend([stacked, curved, curved_only]);
+    edits
+}
+/// Grading per wheel at balance -1/0/1, all wheels, and stacked with every other
+/// color and tone stage, with and without curves.
+fn grading_edits() -> Vec<EditState> {
+    let wheel = |hue, chroma, lightness| GradingWheel {
+        hue,
+        chroma,
+        lightness,
+    };
+    let mut edits = Vec::new();
+    for balance in [-1.0, 0.0, 1.0] {
+        for k in 0..3 {
+            let mut e = EditState::default();
+            e.color.grading[k] = wheel(0.1 + 0.3 * k as f32, 0.8, if k == 1 { -1.0 } else { 1.0 });
+            e.color.scalars.grading_balance = balance;
+            edits.push(e);
+        }
+        let mut all = EditState::default();
+        all.color.grading = [
+            wheel(0.72, 0.6, 0.5),
+            wheel(0.0, 0.0, -0.4),
+            wheel(0.17, 1.0, 1.0),
+        ];
+        all.color.scalars.grading_balance = balance;
+        edits.push(all);
+    }
+    let mut stacked = edits[3].clone();
+    stacked.calibration.exposure = 0.5;
+    stacked.calibration.temperature = 0.3;
+    stacked.tone.contrast = 0.5;
+    stacked.tone.shadows = 0.4;
+    stacked.color.scalars.vibrance = 0.5;
+    stacked.color.scalars.saturation = -1.0;
+    stacked.color.hsl = hsl_edits().remove(8).color.hsl;
+    let mut curved = stacked.clone();
+    curved.curves = curve_edits().remove(3).curves;
+    let mut curved_only = edits[3].clone();
+    curved_only.curves = curved.curves.clone();
+    edits.extend([stacked, curved, curved_only]);
+    edits
+}
+/// Channel mixer and monochrome: a general matrix, each B&W preset, and stacks
+/// with white balance, tone, curves, HSL, vibrance/saturation and grading.
+fn mixer_edits() -> Vec<EditState> {
+    use filter_core::grading::BW_PRESETS;
+    let matrix = [[0.9, 0.35, -0.2], [-0.15, 1.3, -0.1], [0.05, -0.4, 1.6]];
+    let mut edits = Vec::new();
+    let mut mixer = EditState::default();
+    mixer.color.scalars.channel_mixer = matrix;
+    edits.push(mixer.clone());
+    let mut mono = EditState::default();
+    mono.color.scalars.monochrome = true;
+    edits.push(mono);
+    for (_, weights) in BW_PRESETS {
+        let mut e = EditState::default();
+        e.apply_bw_response(weights);
+        edits.push(e);
+    }
+    let mut stacked = mixer.clone();
+    stacked.calibration.exposure = 0.5;
+    stacked.calibration.temperature = 0.4;
+    stacked.calibration.tint = -0.2;
+    stacked.tone.contrast = 0.4;
+    stacked.tone.blacks = -0.3;
+    stacked.color.scalars.vibrance = 0.4;
+    stacked.color.scalars.saturation = -0.3;
+    stacked.color.hsl = hsl_edits().remove(8).color.hsl;
+    stacked.color.grading = grading_edits().remove(3).color.grading;
+    let mut curved = stacked.clone();
+    curved.curves = curve_edits().remove(3).curves;
+    // Monochrome with per-channel curves (toned B&W), then the perceptual stages.
+    let mut toned = curved.clone();
+    toned.apply_bw_response(BW_PRESETS[4].1);
+    let mut toned_no_curves = stacked.clone();
+    toned_no_curves.apply_bw_response(BW_PRESETS[2].1);
+    edits.extend([stacked, curved, toned, toned_no_curves]);
+    edits
+}
+/// Hue sweeps across chroma around the HSL gate, and special values.
+fn color_rows(row: u32, x: f32, i: u32) -> [f32; 3] {
+    use filter_core::color::oklab_to_rec2020;
+    let lab = |degrees: f32, chroma: f32, l: f32| {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        oklab_to_rec2020([l, chroma * cos, chroma * sin])
+    };
+    match row {
+        3 => lab(x * 360.0, 0.02 + 0.2 * x, 0.6),
+        4 => lab(
+            x * 360.0 + 3.0,
+            [0.003, 0.006, 0.02, 0.045, 0.2][(i % 5) as usize],
+            0.2 + 0.6 * x,
+        ),
+        _ => {
+            const SPECIAL: [[f32; 3]; 8] = [
+                [0.0, 0.0, 0.0],
+                [0.18, 0.18, 0.18],
+                [-0.3, 0.2, 0.05],
+                [4.0, 0.1, -0.2],
+                [0.001, 0.001, 0.001],
+                [0.5, 2.5, 0.1],
+                [-0.01, -0.01, -0.01],
+                [0.25, 0.0, 3.0],
+            ];
+            SPECIAL[(i % 8) as usize]
+        }
+    }
+}
+/// Rows of gradients, ramps, color sweeps and special values with mixed alpha.
+fn test_image(w: u32, h: u32) -> ImageBuffer {
+    ImageBuffer::new(
+        w,
+        h,
+        (0..w * h)
+            .map(|i| {
+                let x = (i % w) as f32 / (w - 1) as f32;
+                let rgb = match i / w {
+                    0 => [x * x, x, 1.0 - x],
+                    1 => [x * 4.0 - 1.0, x * 2.0 - 0.5, 0.125],
+                    2 => [x * 0.001; 3],
+                    row => color_rows(row, x, i),
+                };
+                [
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
+                    [0.0, 0.25, 0.5, 1.0][i as usize % 4],
+                ]
+                .map(f16::from_f32)
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+/// Render every tile of the plan and assemble the half-float image.
+fn render_tiles(
+    renderer: &TiledExposure,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    image: &ImageBuffer,
+    plan: &TilePlan,
+    settings: &BasicAdjustments,
+) -> Vec<[f16; 4]> {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let mut actual = vec![[f16::ZERO; 4]; w * h];
+    for tile in plan.tiles() {
+        let mut pending = renderer
+            .submit_adjusted(device, queue, image, tile, settings)
+            .unwrap();
+        let started = Instant::now();
+        let data = loop {
+            device.poll(wgpu::PollType::Poll).unwrap();
+            if let Some(data) = pending.try_read().unwrap() {
+                break data;
+            }
+            assert!(started.elapsed() < Duration::from_secs(30));
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        for (row, data) in data.chunks_exact(tile.width as usize).enumerate() {
+            let start = (tile.y as usize + row) * w + tile.x as usize;
+            actual[start..start + data.len()].copy_from_slice(data);
+        }
+    }
+    actual
+}
 #[test]
 #[ignore = "requires a Vulkan/DX12/Metal software adapter"]
 fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
@@ -93,29 +304,8 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
             .expect("software adapter required");
         eprintln!("Software GPU: {:?}", adapter.get_info());
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
-        let (w, h) = (67, 3);
-        let image = ImageBuffer::new(
-            w,
-            h,
-            (0..w * h)
-                .map(|i| {
-                    let x = (i % w) as f32 / (w - 1) as f32;
-                    let rgb = match i / w {
-                        0 => [x * x, x, 1.0 - x],
-                        1 => [x * 4.0 - 1.0, x * 2.0 - 0.5, 0.125],
-                        _ => [x * 0.001; 3],
-                    };
-                    [
-                        rgb[0],
-                        rgb[1],
-                        rgb[2],
-                        [0.0, 0.25, 0.5, 1.0][i as usize % 4],
-                    ]
-                    .map(f16::from_f32)
-                })
-                .collect(),
-        )
-        .unwrap();
+        let (w, h) = (67, 6);
+        let image = test_image(w, h);
         let pixels: Vec<[f32; 4]> = image.pixels().iter().map(|p| p.map(f16::to_f32)).collect();
         let code = format!(
             "{}\n{}\n{}",
@@ -166,6 +356,15 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
         for (case, settings) in snapshots().iter().enumerate() {
             let mut expected = pixels.clone();
             settings.apply(&mut expected);
+            let flags = settings.uniform_rows()[15];
+            let rows = settings.uniform_rows();
+            let stage_active = flags[0] != 0.0
+                || flags[1] != 0.0
+                || rows[..3] != BasicAdjustments::default().uniform_rows()[..3];
+            assert!(
+                !stage_active || expected != pixels,
+                "case {case} is a no-op"
+            );
             let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: bytemuck::cast_slice(settings.uniform_rows()),
@@ -232,25 +431,7 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
             let mut reference = None;
             for edge in [w, 17] {
                 let plan = TilePlan::new(w, h, &device.limits(), edge).unwrap();
-                let mut actual = vec![[f16::ZERO; 4]; pixels.len()];
-                for tile in plan.tiles() {
-                    let mut pending = renderer
-                        .submit_adjusted(&device, &queue, &image, tile, settings)
-                        .unwrap();
-                    let started = Instant::now();
-                    let data = loop {
-                        device.poll(wgpu::PollType::Poll).unwrap();
-                        if let Some(data) = pending.try_read().unwrap() {
-                            break data;
-                        }
-                        assert!(started.elapsed() < Duration::from_secs(30));
-                        std::thread::sleep(Duration::from_millis(1));
-                    };
-                    for (row, data) in data.chunks_exact(tile.width as usize).enumerate() {
-                        let start = (tile.y as usize + row) * w as usize + tile.x as usize;
-                        actual[start..start + data.len()].copy_from_slice(data);
-                    }
-                }
+                let actual = render_tiles(&renderer, &device, &queue, &image, &plan, settings);
                 for (p, q) in expected.iter().zip(&actual) {
                     compare_stored(*p, q.map(f16::to_f32), case);
                 }

@@ -160,6 +160,14 @@ fn histogram_matches_cpu_and_double_buffered_jobs_remain_independent() {
         mixed.tone.shadows = 0.15;
         mixed.color.scalars.vibrance = 0.3;
         mixed.color.scalars.saturation = -0.2;
+        mixed.color.hsl[1].hue = -0.7;
+        mixed.color.hsl[4].saturation = 0.6;
+        mixed.color.hsl[6].lightness = -0.4;
+        mixed.color.grading[0].chroma = 0.7;
+        mixed.color.grading[2].hue = 0.15;
+        mixed.color.grading[2].lightness = 0.5;
+        mixed.color.scalars.grading_balance = 0.4;
+        mixed.color.scalars.channel_mixer = [[1.2, -0.1, -0.1], [0.1, 0.9, 0.0], [-0.1, 0.2, 0.9]];
         let mixed = BasicAdjustments::new(&mixed).unwrap();
         assert!(gpu.try_submit(&device, &queue, &source, &mixed, 6).unwrap());
         compare(

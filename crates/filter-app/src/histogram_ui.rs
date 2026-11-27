@@ -1,6 +1,6 @@
 use eframe::egui;
 use filter_core::{
-    cpu_eval::BasicAdjustments,
+    cpu_eval::{BasicAdjustments, BasicRows},
     histogram::{BINS, Histogram},
 };
 use filter_gpu::{GpuHistogram, SourceTexture};
@@ -8,7 +8,7 @@ use filter_gpu::{GpuHistogram, SourceTexture};
 #[derive(Default)]
 struct HistogramState {
     generation: u64,
-    settings: Option<[[f32; 4]; 6]>,
+    settings: Option<BasicRows>,
     submitted: Option<u64>,
     display: Option<(u64, Histogram)>,
     error: Option<String>,
@@ -21,7 +21,7 @@ impl HistogramState {
         self.display = None;
         self.error = None;
     }
-    fn set_settings(&mut self, settings: Option<[[f32; 4]; 6]>) {
+    fn set_settings(&mut self, settings: Option<BasicRows>) {
         if self.settings != settings {
             self.generation += 1;
             self.settings = settings;

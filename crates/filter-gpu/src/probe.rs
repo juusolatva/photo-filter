@@ -1,9 +1,14 @@
 //! Fixed-size, double-buffered asynchronous source-pixel measurements.
 use crate::readback::Readback;
 use anyhow::{Result, bail, ensure};
-use filter_core::{cpu_eval::BasicAdjustments, probe::ProbeSample};
+use filter_core::{
+    cpu_eval::{BasicAdjustments, BasicRows},
+    probe::ProbeSample,
+};
 use wgpu::util::DeviceExt;
 
+/// The `BasicParams` uniform: 16 vec4 rows.
+const PARAM_BYTES: u64 = std::mem::size_of::<BasicRows>() as u64;
 /// Linear sRGB RGBA as four f32 values, then a u32 status, padded to 32 bytes.
 const BYTES: u64 = 32;
 
@@ -20,8 +25,8 @@ impl GpuProbe {
     pub fn new(device: &wgpu::Device) -> Result<Self> {
         let limits = device.limits();
         ensure!(
-            limits.max_buffer_size >= 96
-                && limits.max_uniform_buffer_binding_size >= 96
+            limits.max_buffer_size >= PARAM_BYTES
+                && limits.max_uniform_buffer_binding_size >= PARAM_BYTES
                 && limits.max_storage_buffer_binding_size >= BYTES
                 && limits.max_compute_workgroups_per_dimension >= 1
                 && limits.max_compute_invocations_per_workgroup >= 1
