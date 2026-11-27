@@ -136,7 +136,10 @@ impl TiledExposure {
         };
         let size = stage.lut.size();
         crate::lut::ensure_lut_size(size, device.limits().max_texture_dimension_3d)?;
-        let mut slot = self.lut.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self
+            .lut
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(cached) = slot.as_ref().filter(|cached| {
             Arc::ptr_eq(&cached.lut, &stage.lut) || cached.lut.same_lattice(&stage.lut)
         }) {

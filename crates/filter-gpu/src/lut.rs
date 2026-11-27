@@ -150,7 +150,10 @@ impl LutGpu {
         result
     }
     fn upload(&self, queue: &wgpu::Queue, lut: &Arc<CubeLut>) {
-        let mut uploaded = self.uploaded.lock().unwrap_or_else(|e| e.into_inner());
+        let mut uploaded = self
+            .uploaded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if uploaded
             .as_ref()
             .is_some_and(|old| Arc::ptr_eq(old, lut) || old.same_lattice(lut))
