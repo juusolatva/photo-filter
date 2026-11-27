@@ -308,14 +308,17 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
         let image = test_image(w, h);
         let pixels: Vec<[f32; 4]> = image.pixels().iter().map(|p| p.map(f16::to_f32)).collect();
         let code = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             include_str!("../src/working.wgsl"),
+            include_str!("../src/lut.wgsl"),
             include_str!("../src/output.wgsl"),
             r#"
             @group(0) @binding(0) var<storage, read> input: array<vec4<f32>>;
             @group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
             @group(0) @binding(2) var<uniform> params: BasicParams;
             @group(0) @binding(3) var<uniform> curves: ToneCurves;
+            @group(0) @binding(4) var lut_tex: texture_3d<f32>;
+            @group(0) @binding(5) var<uniform> lutp: LutParams;
             @compute @workgroup_size(64)
             fn main(@builtin(global_invocation_id) id:vec3<u32>) {
                 if id.x < arrayLength(&input) { output[id.x]=apply_basic(input[id.x],params); }
@@ -352,6 +355,22 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // No snapshot here has a LUT; the stage is flagged off and never reads this.
+        let lut_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let lut_view = lut_texture.create_view(&Default::default());
         let renderer = TiledExposure::new(&device);
         for (case, settings) in snapshots().iter().enumerate() {
             let mut expected = pixels.clone();
@@ -379,6 +398,11 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
                 contents: &tables,
                 usage: wgpu::BufferUsages::UNIFORM,
             });
+            let lut_params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&settings.lut_rows()),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
             let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &pipeline.get_bind_group_layout(0),
@@ -398,6 +422,14 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: curves.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&lut_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: lut_params.as_entire_binding(),
                     },
                 ],
             });

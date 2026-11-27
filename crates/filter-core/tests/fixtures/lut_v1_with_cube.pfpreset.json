@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "process_version": 1,
+  "id": "5a9c3e7b-2d14-4f86-b0a1-7c8e9d3f1a24",
+  "name": "Wrong schema",
+  "author": "fixture",
+  "tags": [
+    "lut"
+  ],
+  "patch": {
+    "finishing": {
+      "lut_strength": 1.0,
+      "lut": {
+        "kind": "cube",
+        "title": "Identity 2",
+        "size": 2,
+        "domain_min": [
+          0,
+          0,
+          0
+        ],
+        "domain_max": [
+          1,
+          1,
+          1
+        ],
+        "encoding": "f16-shuffle-zlib-v1",
+        "data": "eJxjYMAJbMDYBkzZgFk2NjYAGYAC0Q=="
+      }
+    },
+    "custom_stack_mode": "Replace"
+  }
+}

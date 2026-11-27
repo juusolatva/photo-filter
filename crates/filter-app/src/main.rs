@@ -9,11 +9,13 @@ mod grading_ui;
 mod histogram_ui;
 mod history;
 mod keys;
+mod lut_ui;
 mod mixer_ui;
 mod preset_ui;
 mod preview;
 mod probe_ui;
 mod resize;
+mod snapshot;
 mod view;
 use std::sync::Arc;
 

@@ -17,6 +17,7 @@ pub struct GpuProbe {
     pixel: wgpu::Buffer,
     params: wgpu::Buffer,
     curves: wgpu::Buffer,
+    lut: crate::lut::LutGpu,
     output: wgpu::Buffer,
     bindings: wgpu::BindGroup,
     readback: Readback<u64>,
@@ -54,6 +55,7 @@ impl GpuProbe {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let curves = super::curve_buffer(device, "color probe tone curves");
+        let lut = crate::lut::LutGpu::new(device, "color probe LUT")?;
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("color probe output"),
             size: BYTES,
@@ -80,6 +82,14 @@ impl GpuProbe {
                     binding: 3,
                     resource: curves.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(lut.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: lut.params().as_entire_binding(),
+                },
             ],
         });
         Ok(Self {
@@ -87,10 +97,15 @@ impl GpuProbe {
             pixel,
             params,
             curves,
+            lut,
             output,
             bindings,
             readback: Readback::new(device, "Color probe", BYTES),
         })
+    }
+    /// Lattice uploads performed so far (diagnostics and tests).
+    pub fn lut_uploads(&self) -> u64 {
+        self.lut.uploads()
     }
     pub fn is_pending(&self) -> bool {
         self.readback.is_pending()
@@ -106,6 +121,10 @@ impl GpuProbe {
         settings: &BasicAdjustments,
         generation: u64,
     ) -> bool {
+        // Only fails for a lattice beyond the device limit, which `new` rules out.
+        if self.lut.set(queue, settings).is_err() {
+            return false;
+        }
         self.readback.submit(device, generation, |readback| {
             queue.write_buffer(&self.pixel, 0, bytemuck::cast_slice(&pixel));
             queue.write_buffer(

@@ -1,11 +1,19 @@
 //! CPU reference for the basic pointwise WGSL stages, in straight linear Rec.2020:
 //! calibration (with the folded channel mixer or monochrome), tone, tone curves, then
-//! the HSL mixer, vibrance/saturation and color grading. Spatial filters and custom-stack execution are separate work.
+//! the HSL mixer, vibrance/saturation and color grading, then the Finishing `.cube`
+//! LUT. The LUT stage wraps the rest (`pixel_perturbed` over `adjust_perturbed`) so
+//! the early returns of the adjustment stages stay intact; its parameters are the
+//! separate `lut_rows`, which keeps `BasicRows` at 256 bytes. Spatial filters and
+//! custom-stack execution are separate work.
 use crate::{
-    color::{oklab_to_rec2020, rec2020_to_oklab_perturbed, relative_white_balance, transform},
+    color::{
+        linear_srgb_to_rec2020, linear_to_srgb, oklab_to_rec2020, rec2020_to_linear_srgb,
+        rec2020_to_oklab_perturbed, relative_white_balance, srgb_to_linear, transform,
+    },
     curve::CurveLut,
     edit::{Calibration, Curves, EditState, ModelError, Tone},
     grading::{self, GRADE_ROWS, HSL_ROWS},
+    lut::{CubeLut, LutSlot, any_nonfinite3},
 };
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -22,12 +30,27 @@ const GRADE_START: usize = 12;
 /// active, w grading pivot.
 const FLAGS: usize = 15;
 
+/// Vec4 rows in the `LutParams` uniform (48 bytes).
+pub const LUT_ROWS: usize = 3;
+/// `LutParams`: row 0 domain min xyz and strength, row 1 domain max xyz and the
+/// active flag (0 or 1), row 2 `1 / (max - min)` xyz and `N - 1`. All zero when inactive.
+pub type LutRows = [[f32; 4]; LUT_ROWS];
+
+/// The active LUT stage: a LUT is present and its strength is above zero.
+#[derive(Clone, Debug)]
+pub struct LutStage {
+    pub lut: Arc<CubeLut>,
+    pub strength: f32,
+}
+
 /// Validated immutable snapshot, shared by CPU probes, preview and tiled export.
 #[derive(Clone, Debug)]
 pub struct BasicAdjustments {
     pub(crate) rows: BasicRows,
     /// Baked tone curves; `None` when all are the identity.
     curves: Option<Arc<CurveLut>>,
+    /// Finishing LUT; `None` without a LUT or at strength 0.
+    lut: Option<LutStage>,
 }
 impl Default for BasicAdjustments {
     fn default() -> Self {
@@ -53,6 +76,9 @@ impl BasicAdjustments {
         unsupported.color.scalars.grading_balance = 0.0;
         unsupported.color.scalars.channel_mixer = EditState::default().color.scalars.channel_mixer;
         unsupported.color.scalars.monochrome = false;
+        // The LUT renders (see `lut_rows`); vignette and grain stay rejected.
+        unsupported.finishing.lut = LutSlot::None;
+        unsupported.finishing.lut_strength = EditState::default().finishing.lut_strength;
         unsupported
             .custom_stack
             .retain(|n| n.effective_enabled() && n.opacity > 0.0);
@@ -111,7 +137,16 @@ impl BasicAdjustments {
                 0.0
             },
         ];
-        Ok(Self { rows, curves })
+        let lut = edit
+            .finishing
+            .lut
+            .cube()
+            .filter(|_| edit.finishing.lut_strength > 0.0)
+            .map(|lut| LutStage {
+                lut: Arc::clone(lut),
+                strength: edit.finishing.lut_strength,
+            });
+        Ok(Self { rows, curves, lut })
     }
     /// Exposure-only snapshot. Like EditState, accepts finite EV in [-5, 5].
     pub fn exposure(ev: f32) -> Result<Self, ModelError> {
@@ -133,6 +168,31 @@ impl BasicAdjustments {
         self.curves.as_ref()
     }
 
+    /// The active LUT stage, or `None` when the shader skips it.
+    pub fn lut(&self) -> Option<&LutStage> {
+        self.lut.as_ref()
+    }
+    /// True when no stage changes any pixel: the uniform rows match the exposure-free
+    /// neutral snapshot and no LUT is active. Callers must not decide neutrality
+    /// from `uniform_rows()` alone.
+    pub fn is_neutral(&self) -> bool {
+        self.lut.is_none() && self.rows == Self::default().rows && self.curves.is_none()
+    }
+    /// `LutParams` rows for the GPU, from which the CPU stage also reads its
+    /// domain, `inv` and strength so both sides use identical f32 values.
+    pub fn lut_rows(&self) -> LutRows {
+        let Some(stage) = &self.lut else {
+            return [[0.0; 4]; LUT_ROWS];
+        };
+        let (min, max) = (stage.lut.domain_min(), stage.lut.domain_max());
+        let inv = std::array::from_fn::<f32, 3, _>(|c| 1.0 / (max[c] - min[c]));
+        [
+            [min[0], min[1], min[2], stage.strength],
+            [max[0], max[1], max[2], 1.0],
+            [inv[0], inv[1], inv[2], (stage.lut.size() - 1) as f32],
+        ]
+    }
+
     pub fn pixel(&self, pixel: [f32; 4]) -> [f32; 4] {
         self.pixel_perturbed(pixel, [0.0; 3])
     }
@@ -140,6 +200,33 @@ impl BasicAdjustments {
     /// conditioning tests only.
     #[doc(hidden)]
     pub fn pixel_perturbed(&self, pixel: [f32; 4], root_error: [f32; 3]) -> [f32; 4] {
+        let adjusted = self.adjust_perturbed(pixel, root_error);
+        match &self.lut {
+            None => adjusted,
+            Some(stage) => {
+                let rgb = self.lut_stage(stage, [adjusted[0], adjusted[1], adjusted[2]]);
+                [rgb[0], rgb[1], rgb[2], adjusted[3]]
+            }
+        }
+    }
+    /// Finishing LUT on straight linear Rec.2020, matching `lut_stage` in WGSL:
+    /// encode in mirrored sRGB, clamp the lookup to the domain, interpolate
+    /// tetrahedrally, then mix `e + strength * (lookup - clamped)` so values outside
+    /// the domain keep their residual at unit slope.
+    fn lut_stage(&self, stage: &LutStage, rgb: [f32; 3]) -> [f32; 3] {
+        if any_nonfinite3(rgb) {
+            return rgb;
+        }
+        let [dmin, dmax, inv] = self.lut_rows();
+        let encoded = rec2020_to_linear_srgb(rgb).map(linear_to_srgb);
+        let v: [f32; 3] = std::array::from_fn(|c| encoded[c].max(dmin[c]).min(dmax[c]));
+        let t = std::array::from_fn(|c| ((v[c] - dmin[c]) * inv[c]).clamp(0.0, 1.0));
+        let looked_up = stage.lut.tetra(t);
+        let mixed: [f32; 3] = std::array::from_fn(|c| encoded[c] + dmin[3] * (looked_up[c] - v[c]));
+        linear_srgb_to_rec2020(mixed.map(srgb_to_linear))
+    }
+    /// Every stage before the LUT.
+    fn adjust_perturbed(&self, pixel: [f32; 4], root_error: [f32; 3]) -> [f32; 4] {
         let rec2020_to_oklab = |c| rec2020_to_oklab_perturbed(c, root_error);
         let gain = self.rows[3][0];
         let rgb = transform(

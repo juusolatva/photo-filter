@@ -4,6 +4,8 @@
 struct ProbeResult { linear: vec4<f32>, status: vec4<u32> }
 @group(0) @binding(2) var<storage, read_write> result: ProbeResult;
 @group(0) @binding(3) var<uniform> curves: ToneCurves;
+@group(0) @binding(4) var lut_tex: texture_3d<f32>;
+@group(0) @binding(5) var<uniform> lutp: LutParams;
 
 fn invalid4(v: vec4<f32>) -> bool {
     return any((bitcast<vec4<u32>>(v) & vec4(0x7f800000u)) == vec4(0x7f800000u));

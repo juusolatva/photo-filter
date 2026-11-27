@@ -129,3 +129,41 @@ fn saved_full_preset_restores_the_compiled_render_settings() {
         BasicAdjustments::new(&edit).unwrap().uniform_rows()
     );
 }
+
+fn lut_edit(title: &str) -> EditState {
+    use filter_core::lut::{CubeLut, LutSlot};
+    let texels = vec![0x3800u16; 24];
+    let mut edit = EditState::default();
+    let lut = CubeLut::new(2, title, [0.0; 3], [1.0; 3], texels).unwrap();
+    edit.finishing.lut = LutSlot::Cube(std::sync::Arc::new(lut));
+    edit.finishing.lut_strength = 0.5;
+    edit
+}
+
+#[test]
+fn applying_an_identical_lut_keeps_the_current_arc() {
+    let current = lut_edit("Look");
+    let preset = Preset::capture("Look", &lut_edit("Look"), &Sections::ALL).unwrap();
+    let preset = Preset::from_json(&preset.to_json().unwrap()).unwrap();
+    let next = prepare_apply(&current, &preset, &Sections::ALL).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        current.finishing.lut.cube().unwrap(),
+        next.finishing.lut.cube().unwrap()
+    ));
+    assert_eq!(next, current);
+    // A different LUT is adopted.
+    let other = prepare_apply(&EditState::default(), &preset, &Sections::ALL).unwrap();
+    assert_eq!(other.finishing.lut_strength, 0.5);
+    assert!(other.finishing.lut.cube().is_some());
+}
+
+#[test]
+fn a_lut_only_finishing_preset_applies_but_lut_with_grain_names_finishing() {
+    let preset = Preset::capture("Look", &lut_edit("Look"), &Sections::ALL).unwrap();
+    assert!(prepare_apply(&EditState::default(), &preset, &Sections::ALL).is_ok());
+    let mut grainy = lut_edit("Look");
+    grainy.finishing.grain_amount = 0.5;
+    let preset = Preset::capture("Grain", &grainy, &Sections::ALL).unwrap();
+    let error = prepare_apply(&EditState::default(), &preset, &Sections::ALL).unwrap_err();
+    assert!(error.0.contains("Finishing"), "{}", error.0);
+}

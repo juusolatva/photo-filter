@@ -193,6 +193,8 @@ fn prepare_apply(
 ) -> Result<EditState, ModelError> {
     let mut next = edit.clone();
     preset.apply_to(&mut next, sections)?;
+    // An identical LUT keeps its `Arc`: no undo step, no GPU upload.
+    next.finishing.lut = std::mem::take(&mut next.finishing.lut).interned(&edit.finishing.lut);
     // Keep the currently rendered edit intact if the selected effects cannot run.
     BasicAdjustments::new(&next).map_err(|_| {
         ModelError(format!(

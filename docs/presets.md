@@ -2,7 +2,7 @@
 
 `filter-core` provides the initial Phase 1 model without GUI or GPU dependencies.
 The desktop app stores its adjustments in `EditState`; preview and export render
-calibration, the channel mixer and monochrome, basic tone, curves, the HSL mixer, vibrance, saturation and color grading. Other stored parameters and
+calibration, the channel mixer and monochrome, basic tone, curves, the HSL mixer, vibrance, saturation, color grading and a Finishing `.cube` LUT. Other stored parameters and
 custom nodes await their engine stages. The app supports preset file save/load and
 selective application. See [the pointwise renderer](pointwise.md).
 
@@ -86,10 +86,11 @@ the edit. These are library limits; file-reading callers must also bound the
 bytes they read before building an input string.
 
 `process_version: 1` pins algorithm behavior and the linear Rec.2020 working
-space. `schema_version: 1` describes the preset layout. Both are required in
-preset JSON; edits require their process version. Missing, zero, and unsupported
-versions are errors. Future layout migrations belong at the raw JSON boundary;
-there are no earlier schemas to migrate today. A preset never changes an edit's
+space. `schema_version` describes the preset layout: schemas 1 and 2 exist (there
+is no v0). Version 2 is written only when a LUT is embedded; `migrate()` has a
+v1 to v2 step and rejects a v1 file that carries a cube. Both versions are
+required in preset JSON; edits require their process version. Missing, zero, and
+unsupported versions are errors. Layout migrations run at the raw JSON boundary. A preset never changes an edit's
 process version. Algorithm upgrades require an explicit future workflow.
 
 ## Merge contract
@@ -112,7 +113,7 @@ preset validates every section in the file.
 | Curves | Each present master/red/green/blue curve replaces that channel's points. |
 | Color | Vibrance, saturation, channel mixer, monochrome, defringe and grading balance overwrite individually; each present HSL band or grading wheel replaces that entry. |
 | Detail | Lateral CA pair, noise reduction and sharpening fields overwrite individually. |
-| Finishing | Vignette and grain fields overwrite individually. |
+| Finishing | LUT, LUT strength, vignette and grain fields overwrite individually. A missing `lut` key leaves the current LUT untouched; `{"kind":"none"}` clears it. |
 | Custom stack | `Replace` (default) replaces the list; `Append` appends. Every incoming node receives a fresh UUID. |
 
 A missing custom stack leaves it untouched; an empty list with `Replace` clears
@@ -162,6 +163,68 @@ image, because the equal rows remain; the desktop UI resets the matrix to the id
 monochrome is unchecked with equal rows. `Reset channel mixer` restores the identity and turns
 monochrome off.
 
+## Finishing LUT
+
+Desktop workflow: under **Look (LUT)**, **Load .cube…** opens a native file dialog (one file
+operation at a time, like presets); the panel then shows the title (or file name), the size as
+`N³` (plus the domain when it is not 0..1), a **Strength %** slider, **Replace…** and
+**Remove**. Strength is 0 to 100%; double-click resets to 100%. Load, a strength drag and
+Remove are each one undo step. Remove also resets strength to 100%. Loading a LUT identical
+to the current one (same lattice, domain and title) changes nothing and records no step; a
+first LUT starts at 100% and a replacement keeps the current strength. A failed load shows
+the parser message (with the 1-based line number, never the path) and leaves the edit,
+preview and history untouched; a result for a previous image is discarded silently. Drag and
+drop of `.cube` files is not implemented. The file limit is 24 MiB, sizes 2 to 65.
+See [the LUT stage](pointwise.md#cube-lut-look) for the math.
+
+The model is `Finishing.lut` (a `LutSlot`, never `null`) and `Finishing.lut_strength`
+(finite, 0 to 1; default 1, ignored without a LUT):
+
+```json
+"finishing": {
+  "lut_strength": 1.0,
+  "lut": {
+    "kind": "cube", "title": "Warm Portrait Negative", "size": 33,
+    "domain_min": [0, 0, 0], "domain_max": [1, 1, 1],
+    "encoding": "f16-shuffle-zlib-v1", "data": "<base64>"
+  }
+}
+```
+
+or `"lut": {"kind": "none"}`. Unknown `kind`, unknown fields and an unknown `encoding` are
+errors. A `none` is an explicit value, so saving the Finishing section with no LUT writes
+`{"kind":"none"}` and applying that section clears the current LUT. A preset with no `lut`
+key (every file written before this feature) leaves the current LUT untouched. Saving without
+the Finishing section omits both fields.
+
+Embedding: the lattice is little-endian f16 (6 bytes per node, R fastest), byte-shuffled into a
+low-byte plane then a high-byte plane, zlib-compressed (level 6) and written as standard
+padded base64 with no line breaks. Encoder output bytes are not stable across zlib backend
+versions; tests compare decoded lattices only. No hash is stored.
+
+Decode limits, in order: the wire object is validated first (size 2 to 65, finite domain with
+`|v| <= 8` and width of at least 1e-6, title of at most 128 characters with control
+characters removed, known `encoding`); the base64 length is checked against a per-size bound
+(`4 * ceil((raw + raw/1000 + 64) / 3)` for `raw = 6 N³`, at most 3 MiB) before decoding;
+base64 is strict (alphabet, padding, no whitespace, canonical trailing bits); inflation is
+capped at `raw + 1` bytes whatever the compression ratio, and the result must be exactly `raw`
+bytes with nothing after the zlib stream; every value must be a finite f16 with `|v| <= 8`.
+Any failure rejects the whole preset at load, naming the LUT. The whole file stays under the
+16 MiB limit. A duplicate `lut` key is rejected.
+
+Schema: a preset is written as `schema_version` 2 only when its Finishing patch holds a LUT,
+and as version 1 otherwise, so LUT-free presets still load in older builds. Readers accept 1
+and 2; a v1 file carrying a `cube` is rejected. An older build that only knows version 1
+rejects a v2 file with "unsupported preset schema version 2" instead of silently dropping
+the look. `EditState` serialization is otherwise unversioned and only presets write it.
+Applying a preset keeps the current `Arc` for an identical LUT, so it adds no upload.
+A Finishing section holding only a LUT is renderable; vignette or grain still make the section
+unsupported.
+
+Each history step counts its LUT at about `6 N³` bytes without deduplicating shared payloads
+(about 216 KB at 33³, 1.65 MB at 65³), so a 65³ LUT leaves roughly 38 undo steps within the
+64 MiB budget. Evicting steps early is the only effect.
+
 ## Custom nodes and remaining work
 
 Nodes carry a UUID, name, enabled flag, insertion position, blend mode, opacity
@@ -174,9 +237,9 @@ Their stored enabled flag is retained for future applications, but
 `FilterNode::effective_enabled()` returns false so an executor can skip them.
 Node opacity must be finite and within [0, 1].
 
-LUT payload/overlay schemas, additional node types, a full stack UI,
+The Layer 2 `Lut3D` node, additional node types, a full stack UI,
 preset browser/thumbnails, and sidecar file I/O remain subsequent tasks. Newer unknown
 operations can already survive a load/save round trip in the current schema.
 
-Fixed v1 JSON fixtures and regression tests live in
+Fixed JSON fixtures (v1, and decode fixtures for the v2 LUT cases) and regression tests live in
 `crates/filter-core/tests/fixtures` and `crates/filter-core/tests/preset_model.rs`.

@@ -1,5 +1,7 @@
-// Canonical v1 basic pointwise stages. Keep cpu_eval's reference in parity tests.
+// Canonical v1 basic pointwise stages, then the Finishing LUT stage (lut.wgsl). Keep cpu_eval's reference in parity tests.
 // Straight linear Rec.2020; no working-space clipping; alpha is unchanged.
+// BasicParams is unchanged by the LUT: apply_basic wraps apply_adjust and reads the
+// per-shader `lut_tex` / `lutp` globals (bindings 4 and 5) declared next to `curves`.
 // tone1.w flags active curves; color.z/color.w flag any perceptual/tone control.
 // flags.x/y/z flag an active HSL mixer / active grading / any active color stage and
 // flags.w is the grading pivot. The 16 rows are 256 bytes, matching
@@ -174,7 +176,8 @@ fn apply_curves(working: vec3<f32>) -> vec3<f32> {
     }
     return linear_srgb_to_working(curved);
 }
-fn apply_basic(pixel: vec4<f32>, p: BasicParams) -> vec4<f32> {
+// Every stage before the LUT. BasicParams is unchanged by the LUT stage.
+fn apply_adjust(pixel: vec4<f32>, p: BasicParams) -> vec4<f32> {
     let exposed = pixel.rgb * p.tone0.x;
     var rgb = vec3(dot(p.wb0.xyz, exposed), dot(p.wb1.xyz, exposed), dot(p.wb2.xyz, exposed));
     if p.tone1.w == 0.0 {
@@ -193,4 +196,11 @@ fn apply_basic(pixel: vec4<f32>, p: BasicParams) -> vec4<f32> {
         rgb = oklab_to_working(color_stage(working_to_oklab(rgb), p));
     }
     return vec4(rgb, pixel.a);
+}
+// Adjustments, then the Finishing LUT (lut.wgsl; its bindings 4 and 5 are declared
+// by each includer). Inactive LUTs return the adjusted pixel bit-exactly.
+fn apply_basic(pixel: vec4<f32>, p: BasicParams) -> vec4<f32> {
+    let r = apply_adjust(pixel, p);
+    if lutp.dmax.w == 0.0 { return r; }
+    return vec4(lut_stage(r.rgb), r.a);
 }

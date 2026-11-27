@@ -1,12 +1,9 @@
+use crate::snapshot::RenderSnapshot;
 use eframe::egui;
-use filter_core::{
-    ImageBuffer,
-    cpu_eval::{BasicAdjustments, BasicRows},
-    probe::ProbeSample,
-};
+use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments, probe::ProbeSample};
 use filter_gpu::GpuProbe;
 
-type Target = ([u32; 2], BasicRows);
+type Target = ([u32; 2], RenderSnapshot);
 #[derive(Default)]
 struct ProbeState {
     generation: u64,
@@ -118,7 +115,7 @@ impl ProbeUi {
         // Invalidate before collecting: old cursor/image/edit samples and errors
         // cannot appear under the current coordinates, even for a single frame.
         self.state
-            .set_target(request.map(|(xy, s, _)| (xy, *s.uniform_rows())));
+            .set_target(request.map(|(xy, s, _)| (xy, RenderSnapshot::new(s))));
         let Ok(gpu) = &mut self.gpu else {
             return;
         };

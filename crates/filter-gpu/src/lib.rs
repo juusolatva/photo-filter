@@ -7,6 +7,7 @@ use filter_core::{
 use wgpu::util::DeviceExt;
 
 mod histogram;
+mod lut;
 mod probe;
 mod readback;
 pub use probe::GpuProbe;
@@ -44,8 +45,9 @@ fn exposure_shader(device: &wgpu::Device, body: &str) -> wgpu::ShaderModule {
         label: Some("exposure shader"),
         source: wgpu::ShaderSource::Wgsl(
             format!(
-                "{}\n{}\n{body}",
+                "{}\n{}\n{}\n{body}",
                 include_str!("working.wgsl"),
+                include_str!("lut.wgsl"),
                 include_str!("output.wgsl")
             )
             .into(),
@@ -59,6 +61,7 @@ pub struct ExposureRenderer {
     target_is_srgb: bool,
     viewport: wgpu::Buffer,
     curves: wgpu::Buffer,
+    lut: lut::LutGpu,
 }
 pub struct SourceTexture {
     view: wgpu::TextureView,
@@ -160,6 +163,26 @@ impl ExposureRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(lut::PARAM_BYTES),
+                    },
+                    count: None,
+                },
             ],
         });
         let shader = exposure_shader(device, include_str!("exposure.wgsl"));
@@ -205,6 +228,9 @@ impl ExposureRenderer {
             target_is_srgb: format.is_srgb(),
             viewport,
             curves: curve_buffer(device, "viewport tone curves"),
+            // Every wgpu limit tier allows 3D textures of at least 256 cells.
+            lut: lut::LutGpu::new(device, "viewport LUT")
+                .expect("device supports the fixed 65^3 LUT texture"),
         }
     }
     /// Set physical viewport origin/size before painting. All frames from this
@@ -248,6 +274,21 @@ impl ExposureRenderer {
     /// need no call: frames then skip the curve stage.
     pub fn set_curves(&self, queue: &wgpu::Queue, adjustments: &BasicAdjustments) {
         write_curves(queue, &self.curves, adjustments);
+    }
+    /// Finishing LUT for all frames of this renderer, like [`Self::set_curves`].
+    /// Always call it beside `set_curves`: it writes the 48-byte params (which
+    /// switch the stage off when no LUT is active) and uploads the lattice only when
+    /// it changed. Never blocks. An error leaves the stage off.
+    pub fn set_lut(
+        &self,
+        queue: &wgpu::Queue,
+        adjustments: &BasicAdjustments,
+    ) -> anyhow::Result<()> {
+        self.lut.set(queue, adjustments)
+    }
+    /// Lattice uploads performed so far (diagnostics and tests).
+    pub fn lut_uploads(&self) -> u64 {
+        self.lut.uploads()
     }
     pub fn upload(
         &self,
@@ -413,6 +454,14 @@ impl ExposureRenderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.curves.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(self.lut.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.lut.params().as_entire_binding(),
                 },
             ],
         });

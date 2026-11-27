@@ -21,6 +21,7 @@ pub struct GpuHistogram {
     pipeline: wgpu::ComputePipeline,
     params: wgpu::Buffer,
     curves: wgpu::Buffer,
+    lut: crate::lut::LutGpu,
     counters: wgpu::Buffer,
     bindings: Option<(wgpu::TextureView, wgpu::BindGroup)>,
     readback: Readback<Job>,
@@ -64,6 +65,7 @@ impl GpuHistogram {
             pipeline,
             params,
             curves: super::curve_buffer(device, "histogram tone curves"),
+            lut: crate::lut::LutGpu::new(device, "histogram LUT")?,
             counters,
             bindings: None,
             readback: Readback::new(device, "Histogram", BYTES),
@@ -73,6 +75,10 @@ impl GpuHistogram {
     /// Release the cached source binding; already submitted jobs remain readable.
     pub fn clear_source(&mut self) {
         self.bindings = None;
+    }
+    /// Lattice uploads performed so far (diagnostics and tests).
+    pub fn lut_uploads(&self) -> u64 {
+        self.lut.uploads()
     }
     pub fn is_pending(&self) -> bool {
         self.readback.is_pending()
@@ -101,6 +107,7 @@ impl GpuHistogram {
             generation,
             pixels: u64::from(source.width) * u64::from(source.height),
         };
+        self.lut.set(queue, adjustments)?;
         Ok(self.readback.submit(device, job, |readback| {
             if self
                 .bindings
@@ -126,6 +133,14 @@ impl GpuHistogram {
                         wgpu::BindGroupEntry {
                             binding: 3,
                             resource: self.curves.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(self.lut.view()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.lut.params().as_entire_binding(),
                         },
                     ],
                 });

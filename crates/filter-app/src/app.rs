@@ -7,6 +7,7 @@ use crate::eyedropper::Eyedropper;
 use crate::grading_ui::GradingUi;
 use crate::histogram_ui::HistogramUi;
 use crate::history::History;
+use crate::lut_ui::{Actions as LutActions, Loaded as LoadedLut, LutUi};
 use crate::mixer_ui::MixerUi;
 use crate::preset_ui::{Action as PresetAction, PresetUi};
 use crate::preview::{PreviewCallback, RegionPreview, needs_regions};
@@ -41,6 +42,10 @@ enum DialogResult {
         result: Option<Result<Box<Preset>, String>>,
     },
     PresetSave(Option<Result<PathBuf, String>>),
+    LutLoad {
+        generation: u64,
+        result: Option<Result<Box<LoadedLut>, String>>,
+    },
     Export(Box<ExportRequest>),
 }
 
@@ -208,6 +213,8 @@ pub struct PhotoApp {
     adjustments: Result<BasicAdjustments, ModelError>,
     presets: PresetUi,
     curve_ui: CurveUi,
+    /// LUT status and file name; the LUT itself is part of the edit.
+    lut_ui: LutUi,
     /// Selected mixer tab; not part of the edit.
     mixer_ui: MixerUi,
     /// Selected grading wheel tab; not part of the edit.
@@ -303,6 +310,7 @@ impl PhotoApp {
             adjustments: Ok(BasicAdjustments::default()),
             presets: PresetUi::default(),
             curve_ui: CurveUi::default(),
+            lut_ui: LutUi::default(),
             mixer_ui: MixerUi::default(),
             grading_ui: GradingUi::default(),
             channel_ui: ChannelUi,
@@ -393,6 +401,35 @@ impl PhotoApp {
                     .map_err(|e| format!("{e:#}"))
             });
             let _ = tx.send(DialogResult::PresetLoad { generation, result });
+            ctx.request_repaint();
+        });
+    }
+    fn load_lut(&mut self, ctx: &egui::Context) {
+        if self.dialog_open || self.loading || self.source.is_none() {
+            self.lut_ui.status = "Finish the current file operation before loading a LUT.".into();
+            return;
+        }
+        self.dialog_open = true;
+        let generation = self.generation;
+        let tx = self.dialog_tx.clone();
+        let ctx = ctx.clone();
+        self.lut_ui.loading();
+        std::thread::spawn(move || {
+            let result = rfd::FileDialog::new()
+                .add_filter("Cube LUT", &["cube"])
+                .pick_file()
+                .map(|path| {
+                    filter_io::lut::read_cube(&path)
+                        .map(|lut| {
+                            let file_name = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            Box::new(LoadedLut { lut, file_name })
+                        })
+                        .map_err(|e| format!("{e:#}"))
+                });
+            let _ = tx.send(DialogResult::LutLoad { generation, result });
             ctx.request_repaint();
         });
     }
@@ -491,6 +528,15 @@ impl PhotoApp {
                 self.presets
                     .finish_load(generation == self.generation, result);
             }
+            DialogResult::LutLoad { generation, result } => {
+                let same_image = generation == self.generation;
+                if self
+                    .lut_ui
+                    .finish_load(same_image, result, &mut self.edit.finishing)
+                {
+                    self.edit_changed();
+                }
+            }
             DialogResult::PresetSave(result) => {
                 self.presets.status = match result {
                     Some(Ok(path)) => format!("Saved preset {}", path.display()),
@@ -570,6 +616,7 @@ impl PhotoApp {
         );
         self.source = Some(source);
         self.presets = PresetUi::default();
+        self.lut_ui.reset();
         self.replace_edit(EditState::default());
         self.history = History::new(&self.edit);
         self.edit_dirty = false;
@@ -718,6 +765,8 @@ impl PhotoApp {
         ui.separator();
         self.curve_controls(ui);
         ui.separator();
+        self.lut_controls(ui, ctx);
+        ui.separator();
         self.preset_controls(ui, ctx);
         ui.separator();
         self.export_format_controls(ui);
@@ -806,6 +855,22 @@ impl PhotoApp {
         });
         if changed {
             self.edit_changed();
+        }
+    }
+    fn lut_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let can_load = !self.dialog_open && !self.loading;
+        let mut actions = LutActions::default();
+        egui::CollapsingHeader::new("Look (LUT)").show(ui, |ui| {
+            ui.add_enabled_ui(self.source.is_some(), |ui| {
+                actions = self.lut_ui.show(ui, &mut self.edit.finishing, can_load);
+            });
+        });
+        // Apply a change first so a same-frame Load starts from the refreshed snapshot.
+        if actions.changed {
+            self.edit_changed();
+        }
+        if actions.load {
+            self.load_lut(ctx);
         }
     }
     fn curve_controls(&mut self, ui: &mut egui::Ui) {

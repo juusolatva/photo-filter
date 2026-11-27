@@ -247,8 +247,9 @@ fn invalid_selected_parameters_fail_atomically_and_unselected_are_ignored() {
 
 #[test]
 fn versions_are_explicit_and_future_schema_or_process_is_rejected() {
-    for field in ["schema_version", "process_version"] {
-        for version in [json!(0), json!(2), json!(1.5), json!("1"), Value::Null] {
+    // Schema 2 adds the Finishing LUT and is accepted; 3 is the first unknown one.
+    for (field, future) in [("schema_version", 3), ("process_version", 2)] {
+        for version in [json!(0), json!(future), json!(1.5), json!("1"), Value::Null] {
             let mut raw: Value = serde_json::from_str(PARTIAL).unwrap();
             raw[field] = version;
             assert!(

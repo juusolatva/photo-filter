@@ -1,8 +1,12 @@
 //! One-tile-per-submit working-space basic adjustments and asynchronous, row-padded readback.
 use anyhow::{Context, Result, bail, ensure};
-use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments};
+use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments, lut::CubeLut};
 use half::f16;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+    mpsc::{self, Receiver, TryRecvError},
+};
 use wgpu::util::DeviceExt;
 
 const PIXEL_BYTES: u64 = 8;
@@ -83,8 +87,18 @@ fn padded_stride(width: u32) -> u64 {
         * u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
 }
 
+/// The LUT texture shared by all tiles of an export, sized exactly N^3.
+struct TiledLut {
+    lut: Arc<CubeLut>,
+    view: wgpu::TextureView,
+}
 pub struct TiledExposure {
     pipeline: wgpu::ComputePipeline,
+    /// Bound when no LUT is active; its contents are never read.
+    dummy_lut: wgpu::TextureView,
+    /// Created once per distinct LUT, not per tile.
+    lut: Mutex<Option<TiledLut>>,
+    lut_uploads: AtomicU64,
 }
 impl TiledExposure {
     pub fn new(device: &wgpu::Device) -> Self {
@@ -97,7 +111,49 @@ impl TiledExposure {
             compilation_options: Default::default(),
             cache: None,
         });
-        Self { pipeline }
+        let dummy = crate::lut::lut_texture(device, "inactive tile LUT", 1);
+        Self {
+            pipeline,
+            dummy_lut: crate::lut::lut_view(&dummy),
+            lut: Mutex::new(None),
+            lut_uploads: AtomicU64::new(0),
+        }
+    }
+    /// LUT textures created and uploaded so far (diagnostics and tests).
+    pub fn lut_uploads(&self) -> u64 {
+        self.lut_uploads.load(Ordering::Relaxed)
+    }
+    /// The texture view for `adjustments`, uploading the lattice only for a LUT
+    /// that differs from the cached one (by `Arc`, then by content).
+    fn lut_view(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        adjustments: &BasicAdjustments,
+    ) -> Result<wgpu::TextureView> {
+        let Some(stage) = adjustments.lut() else {
+            return Ok(self.dummy_lut.clone());
+        };
+        let size = stage.lut.size();
+        crate::lut::ensure_lut_size(size, device.limits().max_texture_dimension_3d)?;
+        let mut slot = self
+            .lut
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = slot.as_ref().filter(|cached| {
+            Arc::ptr_eq(&cached.lut, &stage.lut) || cached.lut.same_lattice(&stage.lut)
+        }) {
+            return Ok(cached.view.clone());
+        }
+        let texture = crate::lut::lut_texture(device, "tiled export LUT", size as u32);
+        crate::lut::write_lattice(queue, &texture, &stage.lut);
+        let view = crate::lut::lut_view(&texture);
+        *slot = Some(TiledLut {
+            lut: Arc::clone(&stage.lut),
+            view: view.clone(),
+        });
+        self.lut_uploads.fetch_add(1, Ordering::Relaxed);
+        Ok(view)
     }
 
     /// Uploads only this tile, submits one pass and starts map_async. Does not poll or wait.
@@ -209,6 +265,12 @@ impl TiledExposure {
             contents: &params,
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let lut_view = self.lut_view(device, queue, adjustments)?;
+        let lut_params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tile LUT params"),
+            contents: bytemuck::cast_slice(&adjustments.lut_rows()),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         let curves = super::curve_buffer(device, "tile tone curves");
         super::write_curves(queue, &curves, adjustments);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -234,6 +296,14 @@ impl TiledExposure {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: curves.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&lut_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: lut_params.as_entire_binding(),
                 },
             ],
         });
