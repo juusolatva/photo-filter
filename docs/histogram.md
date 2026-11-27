@@ -66,6 +66,43 @@ submission nor collection waits for the GPU. Pending readback requests a repaint
 adapter, especially during an export or software rendering. Native desktop performance
 and Windows/DX12 behavior must be verified separately from local Linux tests.
 
+## Clipping overlay
+
+The viewport can flag clipped pixels. **Shadow clipping** paints opaque pure blue
+and **Highlight clipping** opaque pure red over the canvas; **J** toggles both (if
+either is off both turn on, otherwise both turn off) unless a text field has focus.
+A held key toggles once; key-repeat events do not toggle again.
+
+- A pixel is flagged when the unclipped linear sRGB output of the basic-adjustment
+  pipeline would display as 8-bit sRGB 255 in any channel (highlights: linear
+  value at or above 0.99554525, the decode of 254.5/255) or as 0 in any channel
+  (shadows: below 0.5/255/12.92 ≈ 1.5176e-4). This is the histogram's any-RGB test
+  widened by half a display step at each end. The margin keeps f32 interpolation
+  noise (around 1e-6 of a neighboring texel) from flipping exact endpoint tests
+  between full-resolution tiles and the untiled path. The histogram keeps its exact
+  endpoints (`shadow_clipped`/`highlight_clipped` in `output.wgsl`), so a pixel
+  within half a step of black or white can be flagged without being counted.
+- Flagged fragments visible at 8 bits (alpha at least 0.5/255) show the overlay color instead of the
+  checkerboard composite, in display color with no alpha mixing. Where both
+  conditions hold and both overlays are on, highlights win. Fragments with lower
+  alpha keep the checkerboard. Nonfinite output is not flagged, as the histogram counts it
+  as invalid instead.
+- It is evaluated on whatever the fragment shows: the unedited source on the
+  before side of a before/after split and while Space is held is flagged by the same
+  rule, from its own values.
+- Sampling is unchanged. The overlay applies its tests per fragment to the
+  viewport's sampled values (bilinearly interpolated from the proxy or source
+  tiles, then unpremultiplied), not to the exact pixel set the histogram counts.
+  At zoom levels other than 1:1 the boundary of a flagged area follows the
+  filtered image, so the overlay and histogram agree only approximately there and
+  at alpha edges.
+- The two flags live in the renderer's shared viewport uniform
+  (`ExposureRenderer::set_clipping_overlay`), so the proxy and full-resolution tiles
+  agree with no extra pass, texture or per-tile uniform.
+- It is view state only: not in `EditState`, undo history or presets, kept across
+  image loads in the session, and not restored on restart. Histogram, cursor probe
+  and export do not change.
+
 ## Verification
 
 ```sh
@@ -84,3 +121,11 @@ idle behavior and panel rendering. These checks do not exercise a native desktop
 An additional software-GPU regression injects mapping failure and callback disconnection,
 checks that collection produces no wgpu validation errors, and verifies successful retry
 with a replacement buffer.
+
+Clipping overlay checks (software GPU) render known white, black, mid-gray,
+both-way-clipped, single-channel highlight/shadow, transparent and half-transparent
+pixels with every flag combination through tiled and untiled frames on both target
+paths, including a multi-tile image whose tiled and untiled renders must match byte
+for byte, and a +3 EV edit that pushes mid-gray into highlight clipping. They check exact overlay colors, byte-identical output with the flags off and
+the before side of a split. A headless app test covers the checkboxes, J, text-field
+gating and persistence across image loads. Native desktop behavior is unverified.

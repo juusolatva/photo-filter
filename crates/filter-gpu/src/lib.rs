@@ -218,10 +218,24 @@ impl ExposureRenderer {
     /// Panics if `x` is not finite.
     pub fn set_before_until(&self, queue: &wgpu::Queue, x: f32) {
         assert!(x.is_finite(), "compare split must be finite");
+        queue.write_buffer(&self.viewport, 16, bytemuck::bytes_of(&x));
+    }
+    /// Viewport-only clipping overlay for all frames of this renderer: pure blue
+    /// where any output channel is at or below the black endpoint (`shadows`) and
+    /// pure red where any is at or above white (`highlights`; it wins when both
+    /// hold). The tests match the histogram's any-channel clipping summary, on the
+    /// unclipped linear-sRGB output of whatever each fragment shows, so the
+    /// before side of a comparison is flagged too. Transparent fragments and
+    /// nonfinite output are not flagged. Both default to off, which leaves the
+    /// output unchanged.
+    pub fn set_clipping_overlay(&self, queue: &wgpu::Queue, shadows: bool, highlights: bool) {
         queue.write_buffer(
             &self.viewport,
-            16,
-            bytemuck::cast_slice(&[x, 0.0, 0.0, 0.0]),
+            20,
+            bytemuck::cast_slice(&[
+                f32::from(u8::from(shadows)),
+                f32::from(u8::from(highlights)),
+            ]),
         );
     }
     /// Tone curves for all frames of this renderer, like [`Self::set_viewport`].

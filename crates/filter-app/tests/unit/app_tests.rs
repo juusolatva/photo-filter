@@ -637,6 +637,273 @@ fn before_after_split_drags_and_space_shows_the_original() {
 
 #[test]
 #[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn clipping_overlay_checkboxes_and_j_toggle_view_state_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image.clone()));
+    window.loaded();
+    let state = |window: &Window| (window.app.clipping.shadows, window.app.clipping.highlights);
+    window.frame();
+    assert_eq!(state(&window), (false, false));
+    assert_eq!(window.app.preview.clipping, Default::default());
+
+    // J turns both on; with either off it turns both on again.
+    window.shortcut(egui::Modifiers::NONE, egui::Key::J);
+    assert_eq!(state(&window), (true, true));
+    assert!(window.app.preview.clipping.shadows && window.app.preview.clipping.highlights);
+    window.click("Shadow clipping");
+    assert_eq!(state(&window), (false, true));
+    assert!(!window.app.preview.clipping.shadows);
+    window.shortcut(egui::Modifiers::NONE, egui::Key::J);
+    assert_eq!(state(&window), (true, true));
+    window.click("Highlight clipping");
+    assert_eq!(state(&window), (true, false));
+    window.shortcut(egui::Modifiers::NONE, egui::Key::J);
+    window.shortcut(egui::Modifiers::NONE, egui::Key::J);
+    assert_eq!(state(&window), (false, false), "both on, then both off");
+
+    // View state: no edit, no undo step, and it survives loading another image.
+    assert_eq!(window.app.edit, EditState::default());
+    assert!(!window.app.can_undo() && !window.app.can_redo());
+    window.shortcut(egui::Modifiers::NONE, egui::Key::J);
+    window.app.open(image);
+    window.loaded();
+    window.frame();
+    assert_eq!(state(&window), (true, true));
+    assert!(!window.app.can_undo());
+
+    // A focused text field keeps the key.
+    for _ in 0..80 {
+        if window.ctx.text_edit_focused() {
+            break;
+        }
+        window.shortcut(egui::Modifiers::NONE, egui::Key::Tab);
+    }
+    assert!(window.ctx.text_edit_focused(), "Tab reaches a text field");
+    window.shortcut(egui::Modifiers::NONE, egui::Key::J);
+    assert_eq!(state(&window), (true, true), "J ignored while typing");
+}
+
+/// Press, OS key-repeat events (one in the same frame, more in later frames)
+/// and release of `key`, as a held key produces.
+fn hold(window: &mut Window, key: egui::Key) {
+    let event = |pressed, repeat| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat,
+        modifiers: egui::Modifiers::NONE,
+    };
+    window.events.push(event(true, false));
+    window.events.push(event(true, true));
+    window.frame();
+    for _ in 0..3 {
+        window.events.push(event(true, true));
+        window.frame();
+    }
+    window.events.push(event(false, false));
+    window.frame();
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn holding_w_or_j_toggles_only_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image));
+    window.loaded();
+    window.frame();
+    let clipping = |window: &Window| (window.app.clipping.shadows, window.app.clipping.highlights);
+    for expected in [(true, true), (false, false), (true, true)] {
+        hold(&mut window, egui::Key::J);
+        assert_eq!(clipping(&window), expected, "one toggle per held J");
+    }
+    for expected in [true, false, true] {
+        hold(&mut window, egui::Key::W);
+        assert_eq!(
+            window.app.eyedropper.active, expected,
+            "one toggle per held W"
+        );
+    }
+}
+
+/// Warm orange everywhere except fully transparent columns left of x = 16.
+fn write_tinted_image(path: &Path) {
+    image::RgbaImage::from_fn(64, 32, |x, _| {
+        image::Rgba([200, 150, 100, if x < 16 { 0 } else { 255 }])
+    })
+    .save(path)
+    .unwrap();
+}
+const WB_BUTTON: &str = "White balance picker (W)";
+/// Left of the canvas image's transparent columns, and in the letterbox above it.
+const TRANSPARENT_POINT: egui::Pos2 = egui::pos2(50.0, 1000.0);
+const LETTERBOX_POINT: egui::Pos2 = egui::pos2(500.0, 200.0);
+
+fn white_balance(app: &PhotoApp) -> [f32; 2] {
+    [app.edit.calibration.temperature, app.edit.calibration.tint]
+}
+fn key(window: &mut Window, key: egui::Key, pressed: bool) {
+    window.events.push(egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    window.frame();
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn white_balance_picker_sets_temperature_and_tint_as_one_undo_step() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("tinted.png");
+    write_tinted_image(&image);
+    let mut window = Window::new(Some(image));
+    window.loaded();
+    window.frame();
+    // Earlier edits give the pick a previous state to restore.
+    window.app.edit.calibration.temperature = 0.25;
+    window.app.edit_changed();
+    window.frame();
+    let before = white_balance(&window.app);
+    let expected = {
+        let balance = filter_core::white_balance::pick_white_balance(
+            &window.app.source.as_ref().unwrap().buffer,
+            [40, 16],
+        )
+        .unwrap();
+        [balance.temperature, balance.tint]
+    };
+    assert!(
+        expected[0] < -0.1,
+        "warm orange asks for cooling: {expected:?}"
+    );
+
+    // Active picker: a drag pans and samples nothing; the letterbox, the
+    // divider and a held Space are not image clicks.
+    window.click(WB_BUTTON);
+    assert!(window.app.eyedropper.active);
+    let pan = window.app.view.pan;
+    window.events.push(egui::Event::PointerMoved(CANVAS_POINT));
+    window.press(CANVAS_POINT, true);
+    window.frame();
+    for step in 1..=4 {
+        let pos = CANVAS_POINT + egui::vec2(10.0 * step as f32, 0.0);
+        window.events.push(egui::Event::PointerMoved(pos));
+        window.frame();
+    }
+    window.press(CANVAS_POINT + egui::vec2(40.0, 0.0), false);
+    window.frame();
+    assert_ne!(window.app.view.pan, pan, "drag still pans");
+    assert!(window.app.eyedropper.active);
+    assert_eq!(white_balance(&window.app), before);
+    window.click_at(LETTERBOX_POINT, egui::PointerButton::Primary);
+    assert!(window.app.eyedropper.active);
+    assert_eq!(white_balance(&window.app), before);
+    window.app.compare.split = Some(0.5);
+    window.frame();
+    let divider = egui::pos2(window.app.preview.before_until, 1000.0);
+    window.click_at(divider, egui::PointerButton::Primary);
+    assert!(window.app.eyedropper.active, "divider click is not a pick");
+    assert_eq!(white_balance(&window.app), before);
+    window.app.compare.split = None;
+    window.frame();
+    key(&mut window, egui::Key::Space, true);
+    window.click_at(CANVAS_POINT, egui::PointerButton::Primary);
+    key(&mut window, egui::Key::Space, false);
+    assert!(
+        window.app.eyedropper.active,
+        "Space hold shows the original"
+    );
+    assert_eq!(white_balance(&window.app), before);
+
+    // A transparent area reports an error, keeps the picker and changes nothing.
+    let undoable = window.app.can_undo();
+    window.click_at(TRANSPARENT_POINT, egui::PointerButton::Primary);
+    let text = window.frame();
+    assert!(
+        text.iter().any(|s| s.ends_with("transparent pixel")),
+        "{text:?}"
+    );
+    assert!(window.app.eyedropper.active);
+    assert_eq!(white_balance(&window.app), before);
+    assert_eq!(window.app.can_undo(), undoable);
+
+    // Clicking the image sets both controls, once, and deactivates the picker.
+    window.click_at(CANVAS_POINT, egui::PointerButton::Primary);
+    assert!(!window.app.eyedropper.active);
+    let picked = white_balance(&window.app);
+    for i in 0..2 {
+        assert!((picked[i] - expected[i]).abs() < 1e-6, "{picked:?}");
+    }
+    let text = window.frame();
+    assert!(
+        text.iter()
+            .any(|s| s.starts_with("Pixel (") && s.contains("Temperature")),
+        "{text:?}"
+    );
+    let compiled = filter_core::cpu_eval::BasicAdjustments::new(&window.app.edit).unwrap();
+    assert_eq!(
+        window.app.adjustments.as_ref().unwrap().uniform_rows(),
+        compiled.uniform_rows(),
+        "the renderer snapshot follows the pick"
+    );
+    window.app.step_history(false);
+    assert_eq!(white_balance(&window.app), before, "one step restores both");
+    window.app.step_history(true);
+    assert_eq!(white_balance(&window.app), picked);
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn white_balance_picker_cancels_and_ignores_the_shortcut_while_typing() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("tinted.png");
+    write_tinted_image(&image);
+    let mut window = Window::new(None);
+    // Without an image the button is disabled and W does nothing.
+    window.shortcut(egui::Modifiers::NONE, egui::Key::W);
+    assert!(!window.app.eyedropper.active);
+    window.app.open(image);
+    window.loaded();
+    window.frame();
+
+    window.shortcut(egui::Modifiers::NONE, egui::Key::W);
+    assert!(window.app.eyedropper.active);
+    window.shortcut(egui::Modifiers::NONE, egui::Key::Escape);
+    assert!(!window.app.eyedropper.active);
+    window.click(WB_BUTTON);
+    assert!(window.app.eyedropper.active);
+    window.click(WB_BUTTON);
+    assert!(!window.app.eyedropper.active, "the button toggles");
+    assert_eq!(white_balance(&window.app), [0.0, 0.0]);
+    assert!(!window.app.can_undo());
+
+    // Loading another image cancels a pending pick.
+    window.shortcut(egui::Modifiers::NONE, egui::Key::W);
+    assert!(window.app.eyedropper.active);
+    window.app.open(directory.path().join("tinted.png"));
+    window.loaded();
+    window.frame();
+    assert!(!window.app.eyedropper.active);
+
+    for _ in 0..80 {
+        if window.ctx.text_edit_focused() {
+            break;
+        }
+        window.shortcut(egui::Modifiers::NONE, egui::Key::Tab);
+    }
+    assert!(window.ctx.text_edit_focused(), "Tab reaches a text field");
+    window.shortcut(egui::Modifiers::NONE, egui::Key::W);
+    assert!(!window.app.eyedropper.active, "W ignored while typing");
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
 fn tone_curve_editor_adds_moves_and_removes_points_as_undo_steps() {
     use filter_core::edit::Curve;
     let directory = tempfile::tempdir().unwrap();

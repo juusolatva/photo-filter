@@ -1,6 +1,8 @@
+use crate::clipping::{self, ClippingOverlay};
 use crate::compare::Compare;
 use crate::curve_ui::CurveUi;
 use crate::export::{ExportFormat, ExportJob, ExportResult};
+use crate::eyedropper::Eyedropper;
 use crate::histogram_ui::HistogramUi;
 use crate::history::History;
 use crate::preset_ui::{Action as PresetAction, PresetUi};
@@ -58,6 +60,8 @@ struct Preview {
     proxy_scale: f32,
     /// Physical x left of which the original is shown; see `Compare`.
     before_until: f32,
+    /// Viewport-only clipping overlay; see `ClippingOverlay`.
+    clipping: ClippingOverlay,
 }
 impl Preview {
     /// Upload a new proxy and drop every frame/tile tied to the old image.
@@ -130,6 +134,7 @@ impl Preview {
             frames,
             viewport: visible,
             before_until: self.before_until,
+            clipping: self.clipping,
             adjustments: adjustments.clone(),
         };
         ui.painter()
@@ -202,6 +207,10 @@ pub struct PhotoApp {
     curve_ui: CurveUi,
     view: ViewState,
     compare: Compare,
+    /// Transient white-balance picker; not part of the edit.
+    eyedropper: Eyedropper,
+    /// Persists across image loads for the session; not part of the edit.
+    clipping: ClippingOverlay,
     export: Option<ExportJob>,
     export_status: String,
     export_kind: ExportKind,
@@ -267,6 +276,7 @@ impl PhotoApp {
                 regions,
                 proxy_scale: 1.0,
                 before_until: 0.0,
+                clipping: ClippingOverlay::default(),
             },
             histogram: HistogramUi::new(&rs.device),
             probe: ProbeUi::new(&rs.device),
@@ -286,6 +296,8 @@ impl PhotoApp {
             curve_ui: CurveUi::default(),
             view: ViewState::default(),
             compare: Compare::default(),
+            eyedropper: Eyedropper::default(),
+            clipping: ClippingOverlay::default(),
             export: None,
             export_status: String::new(),
             export_kind: ExportKind::default(),
@@ -550,6 +562,7 @@ impl PhotoApp {
         self.history = History::new(&self.edit);
         self.edit_dirty = false;
         self.view = ViewState::default();
+        self.eyedropper.reset();
     }
     /// Dropped presets load; any other dropped file opens as an image.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -590,8 +603,12 @@ impl PhotoApp {
                 });
                 i.key_down(egui::Key::Space)
             });
-        // Text fields keep their own undo; match Shift+Z before plain Z.
         if keys_free {
+            self.eyedropper.handle_keys(ctx, self.source.is_some());
+            if crate::keys::consume_initial_press(ctx, clipping::TOGGLE_KEY) {
+                self.clipping.toggle_all();
+            }
+            // Text fields keep their own undo; match Shift+Z before plain Z.
             if ctx.input_mut(|i| i.consume_shortcut(&REDO) || i.consume_shortcut(&REDO_ALT)) {
                 self.step_history(true);
             } else if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
@@ -675,6 +692,7 @@ impl PhotoApp {
         rs: &egui_wgpu::RenderState,
     ) -> egui::Ui {
         let histogram_rect = reserve(ui, HistogramUi::HEIGHT);
+        self.clipping.show(ui);
         let probe_rect = reserve(ui, ProbeUi::HEIGHT);
         let probe_panel = ui.new_child(egui::UiBuilder::new().max_rect(probe_rect));
         ui.separator();
@@ -709,6 +727,7 @@ impl PhotoApp {
                         .update_while_editing(false),
                 )
                 .changed();
+            self.eyedropper.show(ui);
             for (label, value) in [
                 ("Temperature", &mut self.edit.calibration.temperature),
                 ("Tint", &mut self.edit.calibration.tint),
@@ -882,7 +901,8 @@ impl PhotoApp {
         device: &wgpu::Device,
         native_zoom: bool,
     ) -> Option<[u32; 2]> {
-        let (viewport, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+        let (viewport, response) =
+            ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         ui.painter()
             .rect_filled(viewport, 0.0, egui::Color32::from_gray(24));
         let (Some(source), Ok(adjustments), true) = (
@@ -923,10 +943,53 @@ impl PhotoApp {
             input,
         )?;
         self.preview.before_until = self.compare.before_until(viewport, ctx.pixels_per_point());
+        self.preview.clipping = self.clipping;
         self.preview
             .paint(ui, device, viewport, placement, source, adjustments);
         self.compare.paint(ui, viewport);
+        self.eyedropper_canvas(ui, &response, viewport, placement.image, size);
         source_pixel(response.hover_pos(), viewport, placement.image, size)
+    }
+    /// While picking: show the hint and let a click (not a drag, which pans) on
+    /// an image pixel set the white balance. The divider and the Space hold
+    /// take precedence over the image.
+    fn eyedropper_canvas(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        viewport: egui::Rect,
+        image: egui::Rect,
+        size: [u32; 2],
+    ) {
+        if !self.eyedropper.active {
+            return;
+        }
+        let scale = ui.ctx().pixels_per_point();
+        let target = |pointer: Option<egui::Pos2>| {
+            pointer
+                .filter(|p| !self.compare.held && !self.compare.grabs(viewport, scale, *p))
+                .and_then(|p| source_pixel(Some(p), viewport, image, size))
+        };
+        let hovered = target(response.hover_pos()).is_some();
+        let clicked = response
+            .clicked()
+            .then(|| target(response.interact_pointer_pos()))
+            .flatten();
+        self.eyedropper.paint_hint(ui, viewport, hovered);
+        if let Some(xy) = clicked {
+            self.pick_white_balance(xy);
+        }
+    }
+    /// Set Temperature and Tint from the source pixel as one undo step.
+    fn pick_white_balance(&mut self, xy: [u32; 2]) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        if let Some(balance) = self.eyedropper.pick(&source.buffer, xy) {
+            self.edit.calibration.temperature = balance.temperature;
+            self.edit.calibration.tint = balance.tint;
+            self.edit_changed();
+        }
     }
     fn schedule_repaint(&self, ctx: &egui::Context) {
         if self.loading || self.export.is_some() {

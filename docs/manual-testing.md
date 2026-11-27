@@ -40,6 +40,24 @@ a transparent PNG, a sharp pixel grid and a photo larger than 36 MP ready.
 - [ ] Hold **Space**; the whole canvas shows the original until release. Tab to **Reset adjustments**, then press Space; adjustments are not reset.
 - [ ] Click **Before/after** again; the edit shows everywhere. Histogram, cursor color and exports describe the edit throughout.
 
+## Clipping overlay
+
+- [ ] Open a photo with blown highlights and crushed shadows; tick **Highlight clipping** and **Shadow clipping**; red and blue areas appear and match the histogram's clipping counts qualitatively. The overlay tests the viewport's sampled values per fragment, not the exact pixel set the histogram counts, so the two agree only approximately at fractional zoom and alpha edges.
+- [ ] Press **J**: both turn on (if either was off), then both off; the checkboxes follow. Holding J toggles once, not repeatedly. J does nothing while typing in a text field such as the preset name.
+- [ ] Raise exposure; red grows. Lower it; red shrinks and blue grows. Pan and zoom, including 100% while tiles refine; there are no seams or mismatches between proxy and tiles.
+- [ ] With **Before/after** or held **Space**, the original side is flagged by its own values. Transparent areas keep the checkerboard.
+- [ ] Export, and check the histogram and cursor color; none include the overlay. Open another image; the toggles keep their state.
+
+## White balance picker
+
+- [ ] Open a photo with a color cast and a neutral gray or white area. Click **White balance picker (W)** (or press **W**): the button highlights, the cursor over the image becomes a crosshair and a hint appears at the bottom of the canvas.
+- [ ] Click the neutral area; Temperature and Tint move together, the cast visibly reduces, the picker turns off and the status line shows the source pixel. **Undo** restores both sliders in one step.
+- [ ] Repeat with different Temperature, Tint and exposure values already set; the picked values are the same.
+- [ ] While picking, drag; the image pans and nothing changes. Click the letterbox or the Before/after divider; nothing changes and the picker stays on. Hold **Space** and click; nothing changes.
+- [ ] Press **Esc**, press the button again, or press **W**; the picker turns off and the sliders are unchanged. Holding W toggles once, not repeatedly. W does nothing while typing in a text field.
+- [ ] Click a transparent area, a nearly black area and a saturated colored area; the first two show an error and change nothing, the third shows a result noting that it was limited to the slider range.
+- [ ] With no image the button is disabled. Open another image while picking; the picker turns off.
+
 ## Undo and redo
 
 - [ ] Drag a slider in several motions without releasing; one **Undo** (or **Ctrl+Z**) returns to the value before the press.
