@@ -166,6 +166,24 @@ fn histogram_matches_cpu_and_double_buffered_jobs_remain_independent() {
             &collect(&mut gpu, &device, 1)[0].1,
             &Histogram::reference_preview(&image, &mixed).unwrap(),
         );
+        // Tone curves reach the histogram through its own curve uniform.
+        let mut curved = EditState::default();
+        curved.curves.master.0 = vec![[0.0, 0.1], [0.5, 0.7], [1.0, 0.95]];
+        curved.curves.red.0 = vec![[0.0, 0.0], [1.0, 0.6]];
+        let curved = BasicAdjustments::new(&curved).unwrap();
+        assert!(
+            gpu.try_submit(&device, &queue, &source, &curved, 6)
+                .unwrap()
+        );
+        let measured = collect(&mut gpu, &device, 1)[0].1.clone();
+        compare(
+            &measured,
+            &Histogram::reference_preview(&image, &curved).unwrap(),
+        );
+        assert_ne!(
+            measured,
+            Histogram::reference_preview(&image, &BasicAdjustments::default()).unwrap()
+        );
         // Active nonfinite samples are excluded and accounted for, even on edge
         // workgroups whose unused invocations still need to reach both barriers.
         let invalid = ImageBuffer::new(

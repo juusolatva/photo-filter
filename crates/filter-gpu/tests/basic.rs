@@ -1,5 +1,10 @@
 //! Explicit software-adapter parity for canonical WGSL, f32 and tiled f16 outputs.
-use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments, edit::EditState};
+use filter_core::{
+    ImageBuffer,
+    cpu_eval::BasicAdjustments,
+    curve,
+    edit::{Curve, EditState},
+};
 use filter_gpu::{TilePlan, TiledExposure};
 use half::f16;
 use std::time::{Duration, Instant};
@@ -41,10 +46,34 @@ fn snapshots() -> Vec<BasicAdjustments> {
         e.color.scalars.saturation = amount;
         edits.push(e);
     }
+    edits.extend(curve_edits());
     edits
         .iter()
         .map(|e| BasicAdjustments::new(e).unwrap())
         .collect()
+}
+/// Tone curves alone (S, per-channel, HDR/negative ends) and between tone and color.
+fn curve_edits() -> Vec<EditState> {
+    let curve = |points: &[[f32; 2]]| Curve(points.to_vec());
+    let mut s_curve = EditState::default();
+    s_curve.curves.master = curve(&[[0.0, 0.0], [0.25, 0.18], [0.75, 0.85], [1.0, 1.0]]);
+    let mut channels = EditState::default();
+    channels.curves.red = curve(&[[0.0, 0.05], [1.0, 1.0]]);
+    channels.curves.green = curve(&[[0.0, 0.1], [0.5, 0.45], [0.8, 0.85], [1.0, 0.9]]);
+    channels.curves.blue = curve(&[[0.0, 0.0], [0.4, 0.3], [1.0, 0.8]]);
+    let mut extended = EditState::default();
+    extended.curves.master = curve(&[[0.0, -0.1], [0.6, 0.7], [1.0, 1.4]]);
+    let mut combined = channels.clone();
+    combined.curves.master = s_curve.curves.master.clone();
+    combined.calibration.exposure = 0.4;
+    combined.calibration.temperature = 0.3;
+    combined.tone.contrast = 0.5;
+    combined.tone.shadows = 0.4;
+    combined.color.scalars.vibrance = 0.6;
+    combined.color.scalars.saturation = -0.4;
+    let mut color_only = extended.clone();
+    color_only.color.scalars.saturation = 0.5;
+    vec![s_curve, channels, extended, combined, color_only]
 }
 #[test]
 #[ignore = "requires a Vulkan/DX12/Metal software adapter"]
@@ -89,12 +118,14 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
         .unwrap();
         let pixels: Vec<[f32; 4]> = image.pixels().iter().map(|p| p.map(f16::to_f32)).collect();
         let code = format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             include_str!("../src/working.wgsl"),
+            include_str!("../src/output.wgsl"),
             r#"
             @group(0) @binding(0) var<storage, read> input: array<vec4<f32>>;
             @group(0) @binding(1) var<storage, read_write> output: array<vec4<f32>>;
             @group(0) @binding(2) var<uniform> params: BasicParams;
+            @group(0) @binding(3) var<uniform> curves: ToneCurves;
             @compute @workgroup_size(64)
             fn main(@builtin(global_invocation_id) id:vec3<u32>) {
                 if id.x < arrayLength(&input) { output[id.x]=apply_basic(input[id.x],params); }
@@ -140,6 +171,15 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
                 contents: bytemuck::cast_slice(settings.uniform_rows()),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
+            let tables = settings.curves().map_or_else(
+                || vec![0; curve::UNIFORM_BYTES],
+                |lut| bytemuck::cast_slice(lut.uniform_rows()).to_vec(),
+            );
+            let curves = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &tables,
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
             let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &pipeline.get_bind_group_layout(0),
@@ -155,6 +195,10 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: curves.as_entire_binding(),
                     },
                 ],
             });
@@ -208,7 +252,7 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
                     }
                 }
                 for (p, q) in expected.iter().zip(&actual) {
-                    compare(*p, q.map(f16::to_f32), case, 0.001);
+                    compare_stored(*p, q.map(f16::to_f32), case);
                 }
                 if let Some(reference) = &reference {
                     assert_eq!(&actual, reference, "tile seam case {case}");
@@ -219,7 +263,29 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
         }
     });
 }
+/// Half-float tiles store the f32 shader result rounded to f16. GPU and CPU f32
+/// results within the shader tolerance can round to adjacent f16 values, so
+/// allow the f16-rounded reference plus one f16 step and the f32 tolerance.
+/// The 8-bit display check is left to the f32 comparison: near-black sRGB
+/// channels of bright saturated pixels come from cancelling Rec.2020 components,
+/// where one f16 step (about 0.001 near 1.3) can move the encoded value by 2/255.
+fn compare_stored(expected: [f32; 4], actual: [f32; 4], case: usize) {
+    for c in 0..3 {
+        let stored = f16::from_f32(expected[c]);
+        let step = (f16::from_bits(stored.to_bits() + 1).to_f32() - stored.to_f32()).abs();
+        let bound = step + 2e-5 * (1.0 + expected[c].abs());
+        assert!(
+            actual[c].is_finite() && (actual[c] - stored.to_f32()).abs() <= bound,
+            "stored case {case}, channel {c}: {actual:?} != {expected:?} (bound {bound})"
+        );
+    }
+    assert_eq!(actual[3], expected[3]);
+}
 fn compare(expected: [f32; 4], actual: [f32; 4], case: usize, tolerance: f32) {
+    compare_working(expected, actual, case, tolerance);
+    compare_display(expected, actual, case);
+}
+fn compare_working(expected: [f32; 4], actual: [f32; 4], case: usize, tolerance: f32) {
     for c in 0..3 {
         assert!(
             actual[c].is_finite()
@@ -228,6 +294,8 @@ fn compare(expected: [f32; 4], actual: [f32; 4], case: usize, tolerance: f32) {
         );
     }
     assert_eq!(actual[3], expected[3]);
+}
+fn compare_display(expected: [f32; 4], actual: [f32; 4], case: usize) {
     let a = filter_core::color::rec2020_to_linear_srgb(actual[..3].try_into().unwrap());
     let b = filter_core::color::rec2020_to_linear_srgb(expected[..3].try_into().unwrap());
     for c in 0..3 {

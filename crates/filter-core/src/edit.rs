@@ -142,7 +142,8 @@ section!(
 );
 
 /// Channel curves replace all control points together. Endpoints are fixed in x;
-/// y may extend beyond [0, 1] for HDR. Evaluation is implemented in a later task.
+/// y may extend to [`CURVE_Y_RANGE`] for HDR and out-of-gamut values. See
+/// `crate::curve` for evaluation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Curve(pub Vec<[f32; 2]>);
 impl Default for Curve {
@@ -150,6 +151,8 @@ impl Default for Curve {
         Self(vec![[0.0, 0.0], [1.0, 1.0]])
     }
 }
+/// Allowed control-point y range, in encoded sRGB units.
+pub const CURVE_Y_RANGE: std::ops::RangeInclusive<f32> = -1.0..=2.0;
 impl Validate for Curve {
     fn validate(&self) -> Result<(), ModelError> {
         if !(2..=1024).contains(&self.0.len())
@@ -162,6 +165,11 @@ impl Validate for Curve {
         }
         for point in &self.0 {
             point.validate()?;
+            if !CURVE_Y_RANGE.contains(&point[1]) {
+                return Err(ModelError(
+                    "curve y coordinates must be within -1..=2".into(),
+                ));
+            }
         }
         if self.0.windows(2).any(|p| p[0][0] >= p[1][0]) {
             return Err(ModelError(

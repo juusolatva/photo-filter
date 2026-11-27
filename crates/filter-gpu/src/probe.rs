@@ -11,6 +11,7 @@ pub struct GpuProbe {
     pipeline: wgpu::ComputePipeline,
     pixel: wgpu::Buffer,
     params: wgpu::Buffer,
+    curves: wgpu::Buffer,
     output: wgpu::Buffer,
     bindings: wgpu::BindGroup,
     readback: Readback<u64>,
@@ -27,6 +28,7 @@ impl GpuProbe {
                 && limits.max_compute_workgroup_size_x >= 1,
             "Device limits cannot support the color probe"
         );
+        super::ensure_curve_limits(device)?;
         let shader = super::exposure_shader(device, include_str!("probe.wgsl"));
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("source pixel color probe"),
@@ -46,6 +48,7 @@ impl GpuProbe {
             contents: bytemuck::cast_slice(BasicAdjustments::default().uniform_rows()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let curves = super::curve_buffer(device, "color probe tone curves");
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("color probe output"),
             size: BYTES,
@@ -68,12 +71,17 @@ impl GpuProbe {
                     binding: 2,
                     resource: output.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: curves.as_entire_binding(),
+                },
             ],
         });
         Ok(Self {
             pipeline,
             pixel,
             params,
+            curves,
             output,
             bindings,
             readback: Readback::new(device, "Color probe", BYTES),
@@ -100,6 +108,7 @@ impl GpuProbe {
                 0,
                 bytemuck::cast_slice(settings.uniform_rows()),
             );
+            super::write_curves(queue, &self.curves, settings);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("color probe dispatch and copy"),
             });

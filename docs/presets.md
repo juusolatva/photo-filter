@@ -17,7 +17,7 @@ their current values, including explicit nonzero settings.
 
 The current renderer rejects selected active effects it cannot render, leaving
 the edit and preview unchanged. The error names the sections to deselect (for
-example Tone containing clarity, Curves, or Color containing HSL/grading).
+example Tone containing clarity, or Color containing HSL/grading).
 Opaque unknown operations are preserved in the applied custom stack, skipped by
 the renderer, and identified in the loaded-preset panel. Schema/process version
 errors and invalid parameters are rejected at load time, even in sections that
@@ -121,7 +121,8 @@ it. Existing IDs survive an append. Crop is stored as normalized
 presets.
 
 Curves contain 2–1024 finite points with strictly increasing x coordinates and
-x endpoints 0 and 1. Their y coordinates can extend beyond [0, 1]. Exposure must
+x endpoints 0 and 1. Their y coordinates can extend beyond [0, 1], within −1 to 2
+(encoded sRGB units); see [tone curves](pointwise.md#tone-curves). Exposure must
 be within −5 to +5 EV. Temperature/tint, brightness, contrast, highlights/shadows, whites/blacks,
 vibrance and saturation must be within −1 to +1. Other scalar parameters must be
 finite; their ranges and algorithms await subsequent engine work.

@@ -2,6 +2,7 @@
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> params: BasicParams;
 @group(0) @binding(2) var<storage, read_write> counters: array<atomic<u32>,1040>;
+@group(0) @binding(3) var<uniform> curves: ToneCurves;
 var<workgroup> local_counts: array<atomic<u32>,1040>;
 
 fn accumulate(pixel: vec4<f32>) {

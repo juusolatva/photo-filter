@@ -6,6 +6,7 @@ struct Params {
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var destination: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var<uniform> curves: ToneCurves;
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {

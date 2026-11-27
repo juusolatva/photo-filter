@@ -1,5 +1,5 @@
 //! GUI-independent basic pointwise GPU renderer. Uses the caller's device and queue.
-use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments};
+use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments, curve};
 use wgpu::util::DeviceExt;
 
 mod histogram;
@@ -9,6 +9,31 @@ pub use probe::GpuProbe;
 mod tiled;
 pub use histogram::GpuHistogram;
 pub use tiled::{PendingTile, Tile, TilePlan, TiledExposure};
+
+/// A `ToneCurves` uniform buffer. Its contents are only read while the
+/// adjustment parameters flag active curves, so it may start zeroed.
+fn curve_buffer(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: curve::UNIFORM_BYTES as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+/// Write active curve tables before a submission that uses `adjustments`.
+fn write_curves(queue: &wgpu::Queue, buffer: &wgpu::Buffer, adjustments: &BasicAdjustments) {
+    if let Some(curves) = adjustments.curves() {
+        queue.write_buffer(buffer, 0, bytemuck::cast_slice(curves.uniform_rows()));
+    }
+}
+/// Devices must bind the 16 KiB curve tables as a uniform.
+fn ensure_curve_limits(device: &wgpu::Device) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        device.limits().max_uniform_buffer_binding_size >= curve::UNIFORM_BYTES as u64,
+        "Device uniform limits cannot hold tone curve tables"
+    );
+    Ok(())
+}
 
 fn exposure_shader(device: &wgpu::Device, body: &str) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -29,6 +54,7 @@ pub struct ExposureRenderer {
     layout: wgpu::BindGroupLayout,
     target_is_srgb: bool,
     viewport: wgpu::Buffer,
+    curves: wgpu::Buffer,
 }
 pub struct SourceTexture {
     view: wgpu::TextureView,
@@ -120,6 +146,16 @@ impl ExposureRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(curve::UNIFORM_BYTES as u64),
+                    },
+                    count: None,
+                },
             ],
         });
         let shader = exposure_shader(device, include_str!("exposure.wgsl"));
@@ -164,6 +200,7 @@ impl ExposureRenderer {
             layout,
             target_is_srgb: format.is_srgb(),
             viewport,
+            curves: curve_buffer(device, "viewport tone curves"),
         }
     }
     /// Set physical viewport origin/size before painting. All frames from this
@@ -186,6 +223,13 @@ impl ExposureRenderer {
             16,
             bytemuck::cast_slice(&[x, 0.0, 0.0, 0.0]),
         );
+    }
+    /// Tone curves for all frames of this renderer, like [`Self::set_viewport`].
+    /// Call before painting frames whose adjustments have active curves; frame
+    /// creation and [`Self::update_frame`] do not upload them. Identity curves
+    /// need no call: frames then skip the curve stage.
+    pub fn set_curves(&self, queue: &wgpu::Queue, adjustments: &BasicAdjustments) {
+        write_curves(queue, &self.curves, adjustments);
     }
     pub fn upload(
         &self,
@@ -347,6 +391,10 @@ impl ExposureRenderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.curves.as_entire_binding(),
                 },
             ],
         });

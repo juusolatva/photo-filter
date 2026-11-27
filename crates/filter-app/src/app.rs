@@ -1,4 +1,5 @@
 use crate::compare::Compare;
+use crate::curve_ui::CurveUi;
 use crate::export::{ExportFormat, ExportJob, ExportResult};
 use crate::histogram_ui::HistogramUi;
 use crate::history::History;
@@ -129,6 +130,7 @@ impl Preview {
             frames,
             viewport: visible,
             before_until: self.before_until,
+            adjustments: adjustments.clone(),
         };
         ui.painter()
             .with_clip_rect(viewport)
@@ -197,6 +199,7 @@ pub struct PhotoApp {
     history: History,
     adjustments: Result<BasicAdjustments, ModelError>,
     presets: PresetUi,
+    curve_ui: CurveUi,
     view: ViewState,
     compare: Compare,
     export: Option<ExportJob>,
@@ -280,6 +283,7 @@ impl PhotoApp {
             history: History::new(&EditState::default()),
             adjustments: Ok(BasicAdjustments::default()),
             presets: PresetUi::default(),
+            curve_ui: CurveUi::default(),
             view: ViewState::default(),
             compare: Compare::default(),
             export: None,
@@ -676,6 +680,8 @@ impl PhotoApp {
         ui.separator();
         self.adjustment_controls(ui);
         ui.separator();
+        self.curve_controls(ui);
+        ui.separator();
         self.preset_controls(ui, ctx);
         ui.separator();
         self.export_format_controls(ui);
@@ -729,9 +735,24 @@ impl PhotoApp {
             }
         });
         if changed {
-            self.adjustments = BasicAdjustments::new(&self.edit);
-            self.edit_dirty = true;
+            self.edit_changed();
         }
+    }
+    fn curve_controls(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Tone curve");
+        let mut changed = false;
+        ui.add_enabled_ui(self.source.is_some(), |ui| {
+            changed = self.curve_ui.show(ui, &mut self.edit.curves);
+        });
+        if changed {
+            self.edit_changed();
+        }
+    }
+    /// Refresh the renderer snapshot after an in-place edit and mark it for
+    /// the next undo step.
+    fn edit_changed(&mut self) {
+        self.adjustments = BasicAdjustments::new(&self.edit);
+        self.edit_dirty = true;
     }
     fn preset_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let enabled = self.source.is_some() && !self.loading && !self.dialog_open;

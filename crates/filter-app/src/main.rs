@@ -1,5 +1,6 @@
 mod app;
 mod compare;
+mod curve_ui;
 mod export;
 mod histogram_ui;
 mod history;

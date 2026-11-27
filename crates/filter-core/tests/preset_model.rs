@@ -471,3 +471,18 @@ fn estimated_bytes_count_curves_names_and_opaque_payloads() {
     // Dropping a deeply nested serde_json value recurses, so leak it in the test.
     std::mem::forget(stacked);
 }
+
+#[test]
+fn curve_y_coordinates_are_limited_for_rendering() {
+    for (y, valid) in [
+        (-1.0, true),
+        (2.0, true),
+        (-1.01, false),
+        (2.01, false),
+        (f32::NAN, false),
+    ] {
+        let mut edit = EditState::default();
+        edit.curves.green.0 = vec![[0.0, 0.0], [0.5, y], [1.0, 1.0]];
+        assert_eq!(edit.validate().is_ok(), valid, "{y}");
+    }
+}

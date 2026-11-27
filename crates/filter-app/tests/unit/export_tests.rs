@@ -819,7 +819,10 @@ fn image_exports_render_the_captured_basic_adjustments() {
     edit.tone.blacks = 0.15;
     edit.color.scalars.vibrance = 0.5;
     edit.color.scalars.saturation = 0.2;
+    edit.curves.master.0 = vec![[0.0, 0.03], [0.4, 0.5], [1.0, 0.97]];
+    edit.curves.green.0 = vec![[0.0, 0.0], [0.6, 0.5], [1.0, 1.0]];
     let snapshot = BasicAdjustments::new(&edit).unwrap();
+    assert!(snapshot.curves().is_some());
     edit.calibration.exposure = -5.0;
     assert_ne!(
         snapshot.pixel([0.2; 4]),

@@ -5,6 +5,8 @@ struct Params { basic: BasicParams, output: vec4<f32>, uv_rect: vec4<f32>, rect:
 struct Viewport { bounds: vec4<f32>, compare: vec4<f32> }
 @group(0) @binding(1) var<uniform> viewport: Viewport;
 @group(0) @binding(2) var<uniform> params: Params;
+// Shared by all frames of a renderer, like `viewport`.
+@group(0) @binding(3) var<uniform> curves: ToneCurves;
 struct VertexOut { @builtin(position) position: vec4<f32> }
 @vertex fn vs_main(@builtin(vertex_index) i: u32) -> VertexOut {
     var uvs = array<vec2<f32>,6>(vec2(0.0,0.0),vec2(0.0,1.0),vec2(1.0,0.0),vec2(1.0,0.0),vec2(0.0,1.0),vec2(1.0,1.0));

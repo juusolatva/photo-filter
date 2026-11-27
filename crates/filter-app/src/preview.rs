@@ -10,6 +10,8 @@ pub struct PreviewCallback {
     pub viewport: egui::Rect,
     /// Physical x left of which the original is shown; see `Compare`.
     pub before_until: f32,
+    /// The frames' adjustments; their tone curves are shared by the renderer.
+    pub adjustments: BasicAdjustments,
 }
 impl egui_wgpu::CallbackTrait for PreviewCallback {
     fn prepare(
@@ -39,6 +41,7 @@ impl egui_wgpu::CallbackTrait for PreviewCallback {
             );
         }
         self.renderer.set_before_until(queue, self.before_until);
+        self.renderer.set_curves(queue, &self.adjustments);
         Vec::new()
     }
     fn paint(
