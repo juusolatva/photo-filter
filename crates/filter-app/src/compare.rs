@@ -32,6 +32,17 @@ impl Compare {
                 .map_or(0.0, |x| x * pixels_per_point)
         }
     }
+    fn handle(x: f32, viewport: egui::Rect) -> egui::Rect {
+        egui::Rect::from_x_y_ranges(x - GRAB..=x + GRAB, viewport.y_range()).intersect(viewport)
+    }
+    /// Whether `pointer` is on the draggable divider, which takes precedence
+    /// over clicks on the image below it.
+    pub fn grabs(&self, viewport: egui::Rect, pixels_per_point: f32, pointer: egui::Pos2) -> bool {
+        !self.held
+            && self
+                .divider_x(viewport, pixels_per_point)
+                .is_some_and(|x| Self::handle(x, viewport).contains(pointer))
+    }
     /// Let the divider be dragged. Call after allocating the canvas, so the
     /// divider lies above it and its drags do not pan the image.
     pub fn interact(&mut self, ui: &egui::Ui, viewport: egui::Rect) {
@@ -41,8 +52,7 @@ impl Compare {
         if self.held || !viewport.is_positive() {
             return;
         }
-        let handle = egui::Rect::from_x_y_ranges(x - GRAB..=x + GRAB, viewport.y_range())
-            .intersect(viewport);
+        let handle = Self::handle(x, viewport);
         let response = ui
             .interact(
                 handle,

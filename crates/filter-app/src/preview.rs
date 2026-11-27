@@ -1,3 +1,4 @@
+use crate::clipping::ClippingOverlay;
 use eframe::egui;
 use filter_core::cpu_eval::BasicAdjustments;
 use filter_gpu::{ExposureFrame, ExposureRenderer, ExposureUpdates, SourceTexture, Tile};
@@ -10,6 +11,8 @@ pub struct PreviewCallback {
     pub viewport: egui::Rect,
     /// Physical x left of which the original is shown; see `Compare`.
     pub before_until: f32,
+    /// Viewport-only clipping flags, applied to whatever each fragment shows.
+    pub clipping: ClippingOverlay,
     /// The frames' adjustments; their tone curves are shared by the renderer.
     pub adjustments: BasicAdjustments,
 }
@@ -41,6 +44,8 @@ impl egui_wgpu::CallbackTrait for PreviewCallback {
             );
         }
         self.renderer.set_before_until(queue, self.before_until);
+        self.renderer
+            .set_clipping_overlay(queue, self.clipping.shadows, self.clipping.highlights);
         self.renderer.set_curves(queue, &self.adjustments);
         Vec::new()
     }

@@ -590,6 +590,187 @@ fn check_compare_split(
     assert_eq!(gpu.render(size, origin, &edited_frames), after);
 }
 
+/// Linear Rec.2020 pixels with known clipping: [white, black, mid-gray, red
+/// that clips both ways, one channel highlighted, one channel shadowed,
+/// transparent white, half-transparent white], repeated across `width`
+/// (a multiple of 8) for two rows.
+fn clipping_source(width: u32) -> Arc<DecodedImage> {
+    let pixels = [
+        [2.0, 2.0, 2.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        [0.18, 0.18, 0.18, 1.0],
+        [1.0, 0.0, 0.0, 1.0],
+        [0.9, 0.7, 0.7, 1.0],
+        [0.5, 0.5, 0.0, 1.0],
+        [2.0, 2.0, 2.0, 0.0],
+        [2.0, 2.0, 2.0, 0.5],
+    ];
+    Arc::new(DecodedImage {
+        buffer: ImageBuffer::new(
+            width,
+            2,
+            (0..width as usize * 2)
+                .map(|i| pixels[i % 8].map(f16::from_f32))
+                .collect(),
+        )
+        .unwrap(),
+        source_orientation: image::metadata::Orientation::NoTransforms,
+        icc_profile: None,
+        exif_bytes: None,
+    })
+}
+
+/// The overlay replaces exactly the flagged positive-alpha pixels with pure
+/// red or blue, in tiles and on the untiled path, and disabled flags leave the
+/// output byte-identical. Flagging follows what each fragment shows.
+fn check_clipping_overlay(
+    gpu: &Harness,
+    regions: &mut RegionPreview,
+    updates: &mut ExposureUpdates,
+) {
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    let pixel_of =
+        |bytes: &[u8], x: usize| -> [u8; 4] { bytes[x * 4..x * 4 + 4].try_into().unwrap() };
+    // Per column: expected pixel with (shadows, highlights) enabled; None keeps `plain`.
+    let expected: [[Option<[u8; 4]>; 8]; 4] = [
+        [None; 8],
+        [
+            None,
+            Some(BLUE),
+            None,
+            Some(BLUE),
+            None,
+            Some(BLUE),
+            None,
+            None,
+        ],
+        [
+            Some(RED),
+            None,
+            None,
+            Some(RED),
+            Some(RED),
+            None,
+            None,
+            Some(RED),
+        ],
+        [
+            Some(RED),
+            Some(BLUE),
+            None,
+            Some(RED),
+            Some(RED),
+            Some(BLUE),
+            None,
+            Some(RED),
+        ],
+    ];
+    let neutral = BasicAdjustments::default();
+    // One tile (8 wide) and several tiles (40 wide, edge 16).
+    for width in [8u32, 40] {
+        let image = clipping_source(width);
+        let texture = gpu.renderer.upload(&gpu.device, &gpu.queue, &image.buffer);
+        let full = rect(0.0, 0.0, width as f32, 2.0);
+        let (size, origin) = ((width, 2), (7, 9));
+        let stride = width as usize * 4;
+        let tiled = gpu.refined(regions, updates, &image, full, &neutral);
+        if width > 16 {
+            assert!(tiled.len() > 1, "{} tile frames", tiled.len());
+        }
+        let untiled = [gpu.untiled(&texture, &image, full, &neutral)];
+        let cases = [("tiled", tiled.as_slice()), ("untiled", untiled.as_slice())];
+        let flag_sets = [(false, false), (true, false), (false, true), (true, true)];
+        for (name, frames) in cases {
+            let context = format!("{:?} {width}px {name}", gpu.format);
+            gpu.renderer.set_clipping_overlay(&gpu.queue, false, false);
+            let plain = gpu.render(size, origin, frames);
+            for (flags, columns) in flag_sets.into_iter().zip(expected) {
+                gpu.renderer
+                    .set_clipping_overlay(&gpu.queue, flags.0, flags.1);
+                let shown = gpu.render(size, origin, frames);
+                for y in 0..2 {
+                    let line = y * stride..(y + 1) * stride;
+                    let (row, base) = (&shown[line.clone()], &plain[line]);
+                    for x in 0..width as usize {
+                        let want = columns[x % 8].unwrap_or_else(|| pixel_of(base, x));
+                        assert_eq!(pixel_of(row, x), want, "{context} {flags:?} ({x},{y})");
+                    }
+                }
+            }
+            gpu.renderer.set_clipping_overlay(&gpu.queue, false, false);
+            assert_eq!(
+                gpu.render(size, origin, frames),
+                plain,
+                "{context} off again"
+            );
+        }
+        // Tiling must not change a single byte, with every overlay combination.
+        for flags in flag_sets {
+            gpu.renderer
+                .set_clipping_overlay(&gpu.queue, flags.0, flags.1);
+            assert_eq!(
+                gpu.render(size, origin, &tiled),
+                gpu.render(size, origin, &untiled),
+                "{:?} {width}px tiled equals untiled with {flags:?}",
+                gpu.format
+            );
+        }
+        gpu.renderer.set_clipping_overlay(&gpu.queue, false, false);
+
+        // The overlay tests the edited output: +3 EV pushes mid-gray to >= 1.
+        let bright = BasicAdjustments::exposure(3.0).unwrap();
+        let bright_tiled = gpu.refined(regions, updates, &image, full, &bright);
+        let bright_untiled = [gpu.untiled(&texture, &image, full, &bright)];
+        for (name, frames) in [
+            ("tiled", bright_tiled.as_slice()),
+            ("untiled", bright_untiled.as_slice()),
+        ] {
+            gpu.renderer.set_clipping_overlay(&gpu.queue, false, true);
+            let shown = gpu.render(size, origin, frames);
+            for y in 0..2 {
+                for x in (2..width as usize).step_by(8) {
+                    assert_eq!(
+                        pixel_of(&shown[y * stride..], x),
+                        RED,
+                        "{:?} {width}px {name} brightened mid-gray ({x},{y})",
+                        gpu.format
+                    );
+                }
+            }
+            gpu.renderer.set_clipping_overlay(&gpu.queue, false, false);
+        }
+    }
+    // The before side of a split, and the held original, are flagged from the
+    // unedited source; the darkened edit side is not.
+    let image = clipping_source(8);
+    let texture = gpu.renderer.upload(&gpu.device, &gpu.queue, &image.buffer);
+    let full = rect(0.0, 0.0, 8.0, 2.0);
+    let (size, origin) = ((8, 2), (7, 9));
+    let dark = BasicAdjustments::exposure(-3.0).unwrap();
+    let frames = [gpu.untiled(&texture, &image, full, &dark)];
+    gpu.renderer
+        .set_before_until(&gpu.queue, (origin.0 + 4) as f32);
+    gpu.renderer.set_clipping_overlay(&gpu.queue, false, false);
+    let plain = gpu.render(size, origin, &frames);
+    gpu.renderer.set_clipping_overlay(&gpu.queue, true, true);
+    let shown = gpu.render(size, origin, &frames);
+    assert_eq!(pixel_of(&shown, 0), RED, "before side flags the white");
+    assert_eq!(pixel_of(&shown, 1), BLUE, "before side flags the black");
+    assert_eq!(
+        pixel_of(&shown, 4),
+        pixel_of(&plain, 4),
+        "dark edit side is not highlight clipped"
+    );
+    assert_eq!(
+        pixel_of(&shown, 5),
+        BLUE,
+        "channel at black stays shadow clipped"
+    );
+    gpu.renderer.set_before_until(&gpu.queue, 0.0);
+    gpu.renderer.set_clipping_overlay(&gpu.queue, false, false);
+}
+
 /// Tone curves are shared by every frame of the renderer: tiles and the
 /// untiled proxy path both match the CPU reference once they are set.
 fn check_tone_curves(
@@ -727,6 +908,7 @@ fn full_resolution_regions_match_untiled_and_reject_stale_uploads() {
         check_tiles_match_untiled_across_pans_and_edits(&gpu, &mut regions, &mut updates, &image);
         check_compare_split(&gpu, &mut regions, &mut updates, &image);
         check_tone_curves(&gpu, &mut regions, &mut updates, &image);
+        check_clipping_overlay(&gpu, &mut regions, &mut updates);
         let large = source(257, 257, false);
         check_cache_stays_bounded(&gpu, &mut regions, &mut updates, &large);
         check_texture_limited_tiles(&gpu, &limited, &large);

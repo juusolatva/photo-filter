@@ -128,6 +128,23 @@ pub fn oklch_to_oklab([l, c, h]: [f32; 3]) -> [f32; 3] {
     [l, c * h.cos(), c * h.sin()]
 }
 
+/// CAT16 matrix from XYZ to the adaptation (LMS) space, and its inverse.
+pub(crate) const CAT16: Matrix3 = [
+    [0.401288, 0.650173, -0.051461],
+    [-0.250268, 1.204414, 0.045854],
+    [-0.002079, 0.048952, 0.953127],
+];
+pub(crate) const CAT16_INVERSE: Matrix3 = [
+    [1.8620678, -1.0112547, 0.14918678],
+    [0.38752654, 0.62144744, -0.008973985],
+    [-0.0158415, -0.03412294, 1.0499644],
+];
+/// Linear control mapping: the target white chromaticity is
+/// `D65_XY + TEMPERATURE_XY * temperature + TINT_XY * tint`.
+pub(crate) const D65_XY: [f32; 2] = [0.3127, 0.3290];
+pub(crate) const TEMPERATURE_XY: [f32; 2] = [0.04, 0.04];
+pub(crate) const TINT_XY: [f32; 2] = [0.01, -0.025];
+
 /// Full CAT16 adaptation from D65 to an application-defined relative white.
 /// Controls are normalized [-1, 1], positive = warmer / more magenta.
 /// This is a creative relative adjustment, not a source-camera Kelvin estimate.
@@ -135,23 +152,16 @@ pub fn relative_white_balance(temperature: f32, tint: f32) -> Matrix3 {
     if temperature == 0.0 && tint == 0.0 {
         return IDENTITY;
     }
-    let cat = [
-        [0.401288, 0.650173, -0.051461],
-        [-0.250268, 1.204414, 0.045854],
-        [-0.002079, 0.048952, 0.953127],
-    ];
-    let inverse = [
-        [1.8620678, -1.0112547, 0.14918678],
-        [0.38752654, 0.62144744, -0.008973985],
-        [-0.0158415, -0.03412294, 1.0499644],
-    ];
-    let x = 0.3127 + 0.04 * temperature + 0.01 * tint;
-    let y = 0.3290 + 0.04 * temperature - 0.025 * tint;
-    let source = transform(cat, rec2020_to_xyz([1.0; 3]));
-    let target = transform(cat, [x / y, 1.0, (1.0 - x - y) / y]);
+    let x = D65_XY[0] + TEMPERATURE_XY[0] * temperature + TINT_XY[0] * tint;
+    let y = D65_XY[1] + TEMPERATURE_XY[1] * temperature + TINT_XY[1] * tint;
+    let source = transform(CAT16, rec2020_to_xyz([1.0; 3]));
+    let target = transform(CAT16, [x / y, 1.0, (1.0 - x - y) / y]);
     let gains = std::array::from_fn::<_, 3, _>(|i| target[i] / source[i]);
-    let scaled = std::array::from_fn(|i| cat[i].map(|v| v * gains[i]));
-    product(XYZ_REC2020, product(inverse, product(scaled, REC2020_XYZ)))
+    let scaled = std::array::from_fn(|i| CAT16[i].map(|v| v * gains[i]));
+    product(
+        XYZ_REC2020,
+        product(CAT16_INVERSE, product(scaled, REC2020_XYZ)),
+    )
 }
 #[cfg(test)]
 #[path = "../tests/unit/color_tests.rs"]

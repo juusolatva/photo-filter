@@ -14,7 +14,7 @@ fn accumulate(pixel: vec4<f32>) {
     }
     let working = apply_basic(vec4(pixel.rgb / max(pixel.a,0.000001),pixel.a),params).rgb;
     let output = output_linear_srgb(working);
-    if any((bitcast<vec3<u32>>(output) & vec3(0x7f800000u)) == vec3(0x7f800000u)) {
+    if any_nonfinite3(output) {
         atomicAdd(&local_counts[1034],1u); return;
     }
     let rgb = clamp(output,vec3(0.0),vec3(1.0));
@@ -28,8 +28,8 @@ fn accumulate(pixel: vec4<f32>) {
         if values[c] >= 1.0 { atomicAdd(&local_counts[1028u+c],1u); }
     }
     atomicAdd(&local_counts[1032],1u);
-    if any(rgb <= vec3(0.0)) { atomicAdd(&local_counts[1035],1u); }
-    if any(rgb >= vec3(1.0)) { atomicAdd(&local_counts[1036],1u); }
+    if shadow_clipped(rgb) { atomicAdd(&local_counts[1035],1u); }
+    if highlight_clipped(rgb) { atomicAdd(&local_counts[1036],1u); }
 }
 
 @compute @workgroup_size(16,16)

@@ -78,6 +78,43 @@ Matrix references: [CSS Color 4 conversion code](https://www.w3.org/TR/css-color
 [Oklab by its author](https://bottosson.github.io/posts/oklab/), and
 [Colour's CAT16 matrix](https://github.com/colour-science/colour/blob/develop/colour/adaptation/datasets/cat.py).
 
+### White balance picker
+
+The eyedropper computes the Temperature and Tint that make a sampled color neutral.
+It is CPU only. Exposure is a scalar and preserves chromaticity, and white balance is
+the next stage, so the original straight-alpha linear Rec.2020 source pixels carry
+exactly the chromaticity white balance adapts. The result is independent of the
+current Temperature, Tint and exposure and of every later stage.
+
+CAT16 adaptation is diagonal in CAT16 LMS with gains `LMS_target / LMS_D65`, where
+`LMS_D65` is the LMS of the Rec.2020 white `[1, 1, 1]`. A sample with LMS `p` becomes
+neutral (proportional to `LMS_D65`) exactly when `LMS_target` is proportional to
+`LMS_D65² / p` elementwise. That target is converted to XYZ with the CAT16 inverse and
+reduced to chromaticity `(x, y)`; the linear control mapping above is then inverted:
+
+```
+Q = ((x - 0.3127) - (y - 0.3290)) / 0.035
+T = ((x - 0.3127) - 0.010 Q) / 0.040
+```
+
+Both controls are limited to [-1, 1]; `PickedBalance::clamped` reports a limited
+result, which only partly neutralizes the sample. `filter_core::white_balance`
+shares the CAT16 matrices and control constants with `relative_white_balance`.
+
+The sample is the alpha-weighted straight-color mean of the 5 x 5 pixels centered on
+the clicked source pixel, clipped at the image edges, skipping pixels with alpha <= 0
+or any nonfinite component. Without any weight the result is `Transparent` (`Invalid`
+if nonfinite pixels were skipped). The app maps the click to the source pixel with the
+same `source_pixel` helper as the cursor probe. A sample is also rejected when its
+luminance Y is below 0.001 (about ten stops under white, too dark to define a white;
+`TooDark`), or its CAT16 response is nonfinite or not positive (`Invalid`).
+
+Limits: the picker neutralizes the sample at the white balance stage only. Later
+stages, such as per-channel RGB curves, can reintroduce a cast, and the tone stages
+act on the already balanced color. It estimates nothing about the scene illuminant;
+it trusts the chosen area to be neutral. Headless tests do not establish native
+desktop pointer behavior.
+
 ## Perceptual controls
 
 After calibration, convert RGB to Oklab. Tone controls change L in this sequence;

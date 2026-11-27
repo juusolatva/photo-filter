@@ -76,6 +76,25 @@ proxy. Hold **Space** to show the original across the whole canvas. Holding Spac
 stops it from clicking a keyboard-focused button, but has no effect while a text field
 has focus. The histogram, cursor color and export always describe the edited image.
 
+**Shadow clipping** and **Highlight clipping** checkboxes below the histogram (or
+**J** to toggle both) flag clipped pixels in the viewport: blue where any channel of
+the output displays as 8-bit black, red where any displays as 8-bit white (the
+histogram's clipping tests with a half-step margin). It is a display aid only: export, histogram and cursor color are unchanged, and
+it also flags the original shown by Before/after or Space. See
+[the clipping overlay](docs/histogram.md#clipping-overlay).
+
+**White balance picker** (button above the Temperature slider, or **W**) sets
+Temperature and Tint together from the image. Click a neutral gray or white area: the
+average of the 5 x 5 original pixels around the click (alpha-weighted, clipped at the
+image edges) becomes neutral at the white balance stage, as one undo step, and the
+picker turns off. Dragging still pans; **Esc**, the button or **W** again cancels (holding W toggles once);
+clicks on the letterbox or the Before/after divider do nothing. The status line below
+the button shows the source pixel and the result, or why nothing changed (transparent,
+too dark, invalid color). The result ignores the current Temperature, Tint and exposure.
+Later per-channel stages such as RGB curves can reintroduce a cast, and a strongly
+colored pick is limited to the slider range. See
+[white balance](docs/pointwise.md#white-balance-picker).
+
 **Undo** and **Redo** in the toolbar (**Ctrl+Z**, and **Ctrl+Shift+Z** or **Ctrl+Y**)
 step through whole-edit history. A slider drag, a held key or a typed slider value
 (applied on Enter or focus loss) is one step; preset application and **Reset adjustments**

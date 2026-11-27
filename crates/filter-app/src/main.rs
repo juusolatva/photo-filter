@@ -1,9 +1,12 @@
 mod app;
+mod clipping;
 mod compare;
 mod curve_ui;
 mod export;
+mod eyedropper;
 mod histogram_ui;
 mod history;
+mod keys;
 mod preset_ui;
 mod preview;
 mod probe_ui;

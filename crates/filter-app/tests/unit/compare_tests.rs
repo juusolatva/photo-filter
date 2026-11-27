@@ -50,3 +50,21 @@ fn out_of_range_fractions_stay_inside_the_canvas() {
         assert!((x - edge).abs() <= 0.25, "{x} vs {edge}");
     }
 }
+
+#[test]
+fn only_a_visible_divider_handle_grabs_the_pointer() {
+    let compare = Compare {
+        split: Some(0.5),
+        held: false,
+    };
+    let x = compare.divider_x(viewport(), 1.0).unwrap();
+    assert!(compare.grabs(viewport(), 1.0, pos2(x, 100.0)));
+    assert!(compare.grabs(viewport(), 1.0, pos2(x + 5.0, 100.0)));
+    assert!(!compare.grabs(viewport(), 1.0, pos2(x + 20.0, 100.0)));
+    assert!(!Compare::default().grabs(viewport(), 1.0, pos2(x, 100.0)));
+    let held = Compare {
+        held: true,
+        ..compare
+    };
+    assert!(!held.grabs(viewport(), 1.0, pos2(x, 100.0)));
+}
