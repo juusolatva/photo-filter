@@ -590,6 +590,31 @@ fn check_compare_split(
     assert_eq!(gpu.render(size, origin, &edited_frames), after);
 }
 
+/// Tone curves are shared by every frame of the renderer: tiles and the
+/// untiled proxy path both match the CPU reference once they are set.
+fn check_tone_curves(
+    gpu: &Harness,
+    regions: &mut RegionPreview,
+    updates: &mut ExposureUpdates,
+    image: &Arc<DecodedImage>,
+) {
+    let mut edit = filter_core::edit::EditState::default();
+    edit.curves.master.0 = vec![[0.0, 0.05], [0.3, 0.2], [0.7, 0.85], [1.0, 1.0]];
+    edit.curves.blue.0 = vec![[0.0, 0.0], [1.0, 0.7]];
+    edit.tone.contrast = 0.3;
+    edit.color.scalars.saturation = 0.2;
+    let settings = BasicAdjustments::new(&edit).unwrap();
+    gpu.renderer.set_curves(&gpu.queue, &settings);
+    let texture = gpu.renderer.upload(&gpu.device, &gpu.queue, &image.buffer);
+    let full = rect(0.0, 0.0, 67.0, 37.0);
+    let frames = gpu.refined(regions, updates, image, full, &settings);
+    let reference = gpu.untiled(&texture, image, full, &settings);
+    let expected = gpu.render((67, 37), (7, 9), &[reference]);
+    let actual = gpu.render((67, 37), (7, 9), &frames);
+    assert_bytes_close(&actual, &expected, &format!("{:?} curves", gpu.format));
+    assert_native_pixels(image, &settings, &actual, (7, 9));
+}
+
 /// Views larger than the cache evict tiles and keep a stable working set.
 fn check_cache_stays_bounded(
     gpu: &Harness,
@@ -701,6 +726,7 @@ fn full_resolution_regions_match_untiled_and_reject_stale_uploads() {
         let image = source(67, 37, true);
         check_tiles_match_untiled_across_pans_and_edits(&gpu, &mut regions, &mut updates, &image);
         check_compare_split(&gpu, &mut regions, &mut updates, &image);
+        check_tone_curves(&gpu, &mut regions, &mut updates, &image);
         let large = source(257, 257, false);
         check_cache_stays_bounded(&gpu, &mut regions, &mut updates, &large);
         check_texture_limited_tiles(&gpu, &limited, &large);

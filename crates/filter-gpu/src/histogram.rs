@@ -20,6 +20,7 @@ struct Job {
 pub struct GpuHistogram {
     pipeline: wgpu::ComputePipeline,
     params: wgpu::Buffer,
+    curves: wgpu::Buffer,
     counters: wgpu::Buffer,
     bindings: Option<(wgpu::TextureView, wgpu::BindGroup)>,
     readback: Readback<Job>,
@@ -36,6 +37,7 @@ impl GpuHistogram {
                 && limits.max_compute_workgroup_size_y >= 16,
             "Device limits cannot support the preview histogram"
         );
+        super::ensure_curve_limits(device)?;
         let shader = super::exposure_shader(device, include_str!("histogram.wgsl"));
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("edited preview histogram"),
@@ -61,6 +63,7 @@ impl GpuHistogram {
         Ok(Self {
             pipeline,
             params,
+            curves: super::curve_buffer(device, "histogram tone curves"),
             counters,
             bindings: None,
             readback: Readback::new(device, "Histogram", BYTES),
@@ -120,6 +123,10 @@ impl GpuHistogram {
                             binding: 2,
                             resource: self.counters.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.curves.as_entire_binding(),
+                        },
                     ],
                 });
                 self.bindings = Some((source.view.clone(), group));
@@ -129,6 +136,7 @@ impl GpuHistogram {
                 0,
                 bytemuck::cast_slice(adjustments.uniform_rows()),
             );
+            super::write_curves(queue, &self.curves, adjustments);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("histogram dispatch and copy"),
             });

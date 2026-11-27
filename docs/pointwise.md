@@ -1,7 +1,8 @@
 # Basic pointwise renderer (process version 1)
 
 The desktop app renders Exposure, relative Temperature/Tint, Brightness, Contrast,
-Highlights/Shadows, Whites/Blacks, Vibrance and Saturation. The controls leave the
+Highlights/Shadows, Whites/Blacks, master/red/green/blue tone curves, Vibrance and
+Saturation, in that order. The controls leave the
 source untouched and feed both the proxy viewport and PNG/JPEG/WebP/TIFF export.
 Export can retain full size or reduce by long edge/percentage; area filtering runs
 after the captured pointwise adjustments and before output conversion.
@@ -42,7 +43,7 @@ there is no silent rescaling. Other modeled controls still require finite values
 and await their engine definitions.
 
 Nondefault unsupported settings cause `BasicAdjustments::new` to return an error,
-including nonidentity curves, clarity, detail, finishing, HSL/grading, channel
+including clarity, detail, finishing, HSL/grading, channel
 mixer and supported-schema custom nodes. Disabled, zero-opacity, and unknown
 custom nodes are skipped. Unknown payloads remain in the original edit/preset.
 This compiler does not mutate them. The current UI exposes implemented controls
@@ -109,6 +110,42 @@ Saturation −1 yields monochrome. Vibrance emphasizes lower-chroma colors; it i
 not a skin-tone mask. Hue and L are preserved by this color step. Convert back
 to Rec.2020 afterward. Alpha is copied unchanged, including zero-alpha pixels.
 
+## Tone curves
+
+Curves run after the tone controls and before vibrance/saturation. Each curve is
+a list of control points (see [the preset contract](presets.md)) interpolated by
+a shape-preserving monotone cubic Hermite spline with PCHIP (Fritsch–Butland)
+tangents: weighted harmonic means of adjacent secants, zero at local extrema and
+plateaus, and limited three-point tangents at the ends. The spline passes through
+every point and never overshoots between them, so monotone points give a
+monotone curve.
+
+`filter-core::curve::CurveLut` bakes all four curves to 1024 samples over
+encoded [0, 1] (sample `i` at `i / 1023`) plus each spline's end tangents. Inside
+[0, 1] a curve is the linear interpolation of its samples; below 0 and above 1 it
+continues linearly from the end sample with the end tangent, preserving HDR
+headroom and negative values. For each pixel:
+
+```
+linear sRGB = Rec.2020 → linear sRGB(working)
+e           = mirrored sRGB encode(channel)        // sign(x) · sRGB(|x|)
+e           = channel curve(master curve(e))       // red/green/blue per channel
+working     = linear sRGB → Rec.2020(mirrored sRGB decode(e))
+```
+
+R/G/B curves therefore act on sRGB primaries, while values outside the sRGB gamut
+or above 1 pass through the extended transfer. A curve whose points all lie on
+y = x is the identity; when all four are, the stage and its round trip are
+skipped, keeping the exact neutral and exposure-only results. Control-point y
+values must be within −1…2 (encoded units). With curves active, tone and color
+use separate Oklab round trips on either side of the curve stage.
+
+The viewport, region tiles, export tiles, histogram and cursor probe bind the same
+16,416-byte `ToneCurves` uniform layout. Viewport frames share one table per
+renderer (`ExposureRenderer::set_curves`, called from the paint callback), so
+per-tile uniforms stay small. Other paths write their own table before each
+submission.
+
 ## Output and verification
 
 The viewport unpremultiplies its alpha-weighted source texture before these
@@ -121,10 +158,16 @@ gamut compression and display dithering remain pending. PNG8, TIFF8, WebP and JP
 
 Ordinary tests cover color references, extended-range round trips, CAT16 white
 chromaticity, exact neutral/exposure behavior, perceptual control behavior and
-invalid/unsupported edits. Explicit software-adapter tests cover all 11 controls
+invalid/unsupported edits, as well as spline interpolation and shape preservation,
+table sampling and extrapolation, stage order and the curve y range. Explicit software-adapter tests cover all 11 controls
 at both endpoints, neutral and mixed settings on near-black, negative/HDR,
 gradient and alpha pixels. They compare f32 shader results at
 `2e-5 * (1 + abs(expected))`, half-float tiles at `0.001 * (1 + abs(expected))`,
-and quantized sRGB at a difference strictly below 2/255. Tiled and untiled output
+and quantized f32 sRGB at a difference strictly below 2/255. Half-float tiles
+must lie within one f16 step (plus the f32 tolerance) of the f16-rounded CPU
+result. Their 8-bit display is not compared, because one f16 step can move a
+near-black sRGB channel of a bright saturated pixel by 2/255. Curve cases cover an
+S curve, per-channel curves, extended (negative/above-1) ends and curves combined
+with tone and color. Tiled and untiled output
 must match exactly. Separate viewport and PNG/JPEG/WebP/TIFF integration tests exercise
 uniform layout, output transfer, alpha and the captured adjustment snapshot.

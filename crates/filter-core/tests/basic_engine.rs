@@ -122,8 +122,61 @@ fn renderer_rejects_invalid_controls_and_unimplemented_active_effects() {
     edit.tone.clarity = 0.1;
     assert!(BasicAdjustments::new(&edit).is_err());
     edit = EditState::default();
-    edit.curves.master.0[1][1] = 0.9;
-    assert!(BasicAdjustments::new(&edit).is_err());
+    edit.curves.master.0[1][1] = 2.5;
+    assert!(BasicAdjustments::new(&edit).is_err(), "curve y beyond 2");
+}
+
+#[test]
+fn tone_curves_render_between_tone_and_color() {
+    use filter_core::color::{linear_srgb_to_rec2020, rec2020_to_oklab};
+    let mut edit = EditState::default();
+    edit.curves.red.0 = vec![[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]];
+    let curved = BasicAdjustments::new(&edit).unwrap();
+    assert!(curved.curves().is_some());
+    let gray = linear_srgb_to_rec2020([0.18; 3]);
+    let [r, g, b, a] = curved.pixel([gray[0], gray[1], gray[2], 0.5]);
+    assert_eq!(a, 0.5);
+    let [_, chroma_a, _] = rec2020_to_oklab([r, g, b]);
+    assert!(chroma_a > 0.02, "the red curve tints gray: {chroma_a}");
+
+    // Saturation follows the curves, so -1 removes the tint again.
+    edit.color.scalars.saturation = -1.0;
+    let [r, g, b, _] = BasicAdjustments::new(&edit)
+        .unwrap()
+        .pixel([gray[0], gray[1], gray[2], 1.0]);
+    let [_, a, b] = rec2020_to_oklab([r, g, b]);
+    assert!(a.abs() < 1e-5 && b.abs() < 1e-5, "{a} {b}");
+
+    // Tone runs first: contrast changes the input the curve sees.
+    let mut toned = EditState::default();
+    toned.tone.contrast = 1.0;
+    toned.curves.master.0 = vec![[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]];
+    let tone_only = {
+        let mut e = toned.clone();
+        e.curves = Default::default();
+        BasicAdjustments::new(&e).unwrap()
+    };
+    let curve_only = {
+        let mut e = toned.clone();
+        e.tone.contrast = 0.0;
+        BasicAdjustments::new(&e).unwrap()
+    };
+    let dark = [0.05, 0.05, 0.05, 1.0];
+    let expected = curve_only.pixel(tone_only.pixel(dark));
+    let actual = BasicAdjustments::new(&toned).unwrap().pixel(dark);
+    for c in 0..3 {
+        assert!(
+            (actual[c] - expected[c]).abs() < 1e-6,
+            "{actual:?} vs {expected:?}"
+        );
+    }
+    // Identity curves keep the exact neutral path.
+    let neutral = BasicAdjustments::new(&EditState::default()).unwrap();
+    assert!(neutral.curves().is_none());
+    assert_eq!(
+        neutral.pixel([0.3, -0.2, 1.7, 0.25]),
+        [0.3, -0.2, 1.7, 0.25]
+    );
 }
 
 #[test]

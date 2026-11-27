@@ -60,6 +60,15 @@ cursor/edit/image results are discarded. **Retry color probe** recovers a failed
 readback. Sampling is bounded and asynchronous on the viewer's device.
 See [the cursor probe contract and manual checks](docs/probe.md).
 
+Under **Tone curve**, choose **RGB**, **Red**, **Green** or **Blue**. Click the plot
+to add a point, drag a point to move it, and double-click or right-click a point to
+remove it. Endpoints move only vertically, and points keep their order. The readout
+shows the hovered or dragged point as input → output on a 0–255 scale. **Reset curve**
+restores the selected channel. Curves apply after the basic tone controls and before
+vibrance/saturation, as smooth curves that do not overshoot their points. Each drag
+or click is one undo step. Preview, histogram, cursor color and export all include
+the curves. See [tone curves](docs/pointwise.md#tone-curves) for the exact domain.
+
 **Before/after** in the toolbar splits the canvas: the unedited source is left of a
 draggable divider and the edit is to its right. The divider stays at its place on the
 canvas while you pan and zoom, and refined full-resolution tiles split exactly like the
@@ -183,7 +192,7 @@ source replacement and device/source limits. The app's headless UI test checks e
 coalescing, idle behavior and reserved-panel rendering; ordinary tests reject stale
 image/edit results and cover retry, bins, luminance and clipping semantics.
 
-Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Rendering of curves, detail, grading and custom nodes remains pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
+Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Tone curves render too; detail, grading and custom nodes remain pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
 
 The workspace separates reusable image/color primitives (`filter-core`), device-sharing GPU rendering (`filter-gpu`), decoding and metadata (`filter-io`), and the desktop UI (`filter-app`). Neither the core, GPU, nor I/O crates depend on egui.
 

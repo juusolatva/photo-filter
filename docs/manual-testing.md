@@ -23,6 +23,15 @@ a transparent PNG, a sharp pixel grid and a photo larger than 36 MP ready.
 - [ ] Pan and zoom; histogram stays unchanged. Edit exposure; curves and clipping counts update.
 - [ ] Hover the histogram; counts appear. During updates, old curves dim and old counts are hidden.
 
+## Tone curve
+
+- [ ] Drag the middle of the RGB curve up and down; the preview brightens/darkens smoothly, and the histogram follows.
+- [ ] Click to add points, drag them past their neighbors and the plot edges; points keep their order and stay inside the plot, and endpoints only move vertically.
+- [ ] Double-click and right-click interior points to remove them; endpoints cannot be removed.
+- [ ] Edit Red, Green and Blue; only that tint changes. Switch tabs; each keeps its own curve. **Reset curve** resets the selected channel only.
+- [ ] At 100%, while tiles refine, and with Before/after split, curves match the proxy without seams. Exports match the preview.
+- [ ] Undo/redo each point drag and click. Apply a preset containing curves; the plot shows them.
+
 ## Before/after
 
 - [ ] Edit exposure and color, then click **Before/after**; the left side shows the original and the right the edit, with matching labels.

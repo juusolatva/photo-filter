@@ -127,6 +127,18 @@ impl Window {
             modifiers: egui::Modifiers::NONE,
         });
     }
+    fn click_at(&mut self, pos: egui::Pos2, button: egui::PointerButton) {
+        self.events.push(egui::Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            self.events.push(egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            self.frame();
+        }
+    }
     fn click(&mut self, line: &str) {
         let center = self.find(line).center();
         self.press(center, true);
@@ -621,4 +633,79 @@ fn before_after_split_drags_and_space_shows_the_original() {
     assert_eq!(window.app.compare.split, None);
     assert_eq!(window.app.preview.before_until, 0.0);
     assert!(!has(&text, "After"));
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn tone_curve_editor_adds_moves_and_removes_points_as_undo_steps() {
+    use filter_core::edit::Curve;
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image));
+    window.loaded();
+    assert!(has(&window.frame(), "Tone curve"));
+    let plot = window.app.curve_ui.plot.expect("the curve plot is painted");
+    let at = |x: f32, y: f32| {
+        egui::pos2(
+            plot.left() + x * plot.width(),
+            plot.bottom() - y * plot.height(),
+        )
+    };
+
+    // Dragging from the diagonal adds a point and moves it as one step.
+    window.press(at(0.5, 0.5), true);
+    window.frame();
+    for step in 1..=5 {
+        window
+            .events
+            .push(egui::Event::PointerMoved(at(0.5, 0.5 + 0.05 * step as f32)));
+        window.frame();
+    }
+    window.press(at(0.5, 0.75), false);
+    window.frame();
+    let master = window.app.edit.curves.master.0.clone();
+    assert_eq!(master.len(), 3, "{master:?}");
+    assert!((master[1][0] - 0.5).abs() < 0.01 && (master[1][1] - 0.75).abs() < 0.01);
+    let adjustments = window.app.adjustments.as_ref().unwrap();
+    assert!(adjustments.curves().is_some(), "curves reach the renderer");
+    // Hovering the dragged point shows its input → output readout.
+    let readout = format!(
+        "Input {:.0} → output {:.0}",
+        master[1][0] * 255.0,
+        master[1][1] * 255.0
+    );
+    let text = window.frame();
+    assert!(has(&text, &readout), "{readout}: {text:?}");
+
+    // A click adds a point; a right-click removes it.
+    window.click_at(at(0.25, 0.1), egui::PointerButton::Primary);
+    assert_eq!(window.app.edit.curves.master.0.len(), 4);
+    window.click_at(at(0.25, 0.1), egui::PointerButton::Secondary);
+    assert_eq!(window.app.edit.curves.master.0, master);
+
+    // Channel tabs edit their own curve.
+    window.click("Red");
+    window.click_at(at(0.5, 0.3), egui::PointerButton::Primary);
+    assert_eq!(window.app.edit.curves.red.0.len(), 3);
+    assert_eq!(window.app.edit.curves.master.0, master);
+    window.click("Reset curve");
+    assert_eq!(window.app.edit.curves.red, Curve::default());
+
+    // Each gesture was one undo step.
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit.curves.red.0.len(), 3, "reset undone");
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(
+        window.app.edit.curves.red,
+        Curve::default(),
+        "red click undone"
+    );
+    for _ in 0..2 {
+        window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    }
+    assert_eq!(window.app.edit.curves.master.0, master, "add/remove undone");
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit, EditState::default(), "the drag undone");
+    assert!(window.app.adjustments.as_ref().unwrap().curves().is_none());
 }

@@ -209,6 +209,8 @@ impl TiledExposure {
             contents: &params,
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let curves = super::curve_buffer(device, "tile tone curves");
+        super::write_curves(queue, &curves, adjustments);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tile bindings"),
             layout: &self.pipeline.get_bind_group_layout(0),
@@ -228,6 +230,10 @@ impl TiledExposure {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: curves.as_entire_binding(),
                 },
             ],
         });
