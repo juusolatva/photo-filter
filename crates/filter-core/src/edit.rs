@@ -1,5 +1,7 @@
-//! Concrete edit parameters. Basic calibration, tone (except clarity), vibrance and
-//! saturation render today; other sections reserve their preset contracts.
+//! Concrete edit parameters. Basic calibration, tone (except clarity), tone curves,
+//! vibrance, saturation, the HSL mixer, grading and the channel mixer or monochrome
+//! render today; other sections reserve their preset contracts.
+use crate::grading::MIXER_LIMIT;
 use crate::pipeline::FilterNode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -272,11 +274,79 @@ impl Color {
         }
     }
 }
+/// Range check for a finite value, naming the offending field.
+fn within(name: &str, value: f32, range: std::ops::RangeInclusive<f32>) -> Result<(), ModelError> {
+    if range.contains(&value) {
+        return Ok(());
+    }
+    let (lo, hi) = (range.start(), range.end());
+    let signed = |v: &f32| {
+        if *v == 0.0 {
+            "0".to_string()
+        } else {
+            format!("{v:+}")
+        }
+    };
+    Err(ModelError(format!(
+        "{name} must be between {} and {}",
+        signed(lo),
+        signed(hi)
+    )))
+}
+impl HslBand {
+    fn validate_range(&self, index: usize) -> Result<(), ModelError> {
+        for (field, value) in [
+            ("hue", self.hue),
+            ("saturation", self.saturation),
+            ("lightness", self.lightness),
+        ] {
+            within(&format!("color.hsl[{index}].{field}"), value, -1.0..=1.0)?;
+        }
+        Ok(())
+    }
+}
+impl GradingWheel {
+    fn validate_range(&self, index: usize) -> Result<(), ModelError> {
+        let name = |field: &str| format!("color.grading[{index}].{field}");
+        within(&name("hue"), self.hue, 0.0..=1.0)?;
+        within(&name("chroma"), self.chroma, 0.0..=1.0)?;
+        within(&name("lightness"), self.lightness, -1.0..=1.0)
+    }
+}
+impl Color {
+    fn validate_mixer(&self) -> Result<(), ModelError> {
+        let limit = MIXER_LIMIT;
+        for (r, row) in self.scalars.channel_mixer.iter().enumerate() {
+            for (c, value) in row.iter().enumerate() {
+                within(
+                    &format!("color.channel_mixer[{r}][{c}]"),
+                    *value,
+                    -limit..=limit,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
 impl Validate for Color {
     fn validate(&self) -> Result<(), ModelError> {
         self.scalars.validate()?;
         self.hsl.validate()?;
-        self.grading.validate()
+        self.grading.validate()?;
+        self.hsl
+            .iter()
+            .enumerate()
+            .try_for_each(|(i, band)| band.validate_range(i))?;
+        self.grading
+            .iter()
+            .enumerate()
+            .try_for_each(|(i, wheel)| wheel.validate_range(i))?;
+        within(
+            "color.grading_balance",
+            self.scalars.grading_balance,
+            -1.0..=1.0,
+        )?;
+        self.validate_mixer()
     }
 }
 
@@ -361,6 +431,31 @@ impl EditState {
         };
         self.color.scalars.vibrance = 0.0;
         self.color.scalars.saturation = 0.0;
+    }
+
+    /// Reset only the eight HSL mixer bands.
+    pub fn reset_hsl(&mut self) {
+        self.color.hsl = Default::default();
+    }
+
+    /// Reset the channel mixer to the identity and switch monochrome off.
+    pub fn reset_mixer(&mut self) {
+        let neutral = ColorScalars::default();
+        self.color.scalars.channel_mixer = neutral.channel_mixer;
+        self.color.scalars.monochrome = false;
+    }
+
+    /// Set a black-and-white response: all three mixer rows equal to `weights`
+    /// (linear sRGB primaries) and monochrome on, so `Y * M == weights`.
+    pub fn apply_bw_response(&mut self, weights: [f32; 3]) {
+        self.color.scalars.channel_mixer = [weights; 3];
+        self.color.scalars.monochrome = true;
+    }
+
+    /// Reset the three grading wheels and the balance control.
+    pub fn reset_grading(&mut self) {
+        self.color.grading = Default::default();
+        self.color.scalars.grading_balance = 0.0;
     }
 
     /// Approximate in-memory size, including curve points, node names and opaque

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "process_version": 1,
+  "id": "6b3a2c71-5d94-4e0a-8f1b-0c7e2a9d4b35",
+  "name": "Orange Filter Mono",
+  "author": "fixture",
+  "tags": ["film", "black-and-white"],
+  "patch": {
+    "tone": { "contrast": 0.15 },
+    "color": {
+      "monochrome": true,
+      "channel_mixer": [[0.62, 0.35, 0.03], [0.62, 0.35, 0.03], [0.62, 0.35, 0.03]],
+      "grading_balance": 0.0,
+      "grading": [
+        { "hue": 0.72, "chroma": 0.1, "lightness": 0.0 },
+        null,
+        { "hue": 0.1, "chroma": 0.15, "lightness": 0.0 }
+      ]
+    },
+    "custom_stack_mode": "Replace"
+  }
+}

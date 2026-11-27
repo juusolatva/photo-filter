@@ -2,7 +2,7 @@
 
 `filter-core` provides the initial Phase 1 model without GUI or GPU dependencies.
 The desktop app stores its adjustments in `EditState`; preview and export render
-calibration, basic tone, vibrance and saturation. Other stored parameters and
+calibration, the channel mixer and monochrome, basic tone, curves, the HSL mixer, vibrance, saturation and color grading. Other stored parameters and
 custom nodes await their engine stages. The app supports preset file save/load and
 selective application. See [the pointwise renderer](pointwise.md).
 
@@ -17,7 +17,7 @@ their current values, including explicit nonzero settings.
 
 The current renderer rejects selected active effects it cannot render, leaving
 the edit and preview unchanged. The error names the sections to deselect (for
-example Tone containing clarity, or Color containing HSL/grading).
+example Tone containing clarity, or Color containing defringe).
 Opaque unknown operations are preserved in the applied custom stack, skipped by
 the renderer, and identified in the loaded-preset panel. Schema/process version
 errors and invalid parameters are rejected at load time, even in sections that
@@ -124,8 +124,14 @@ Curves contain 2–1024 finite points with strictly increasing x coordinates and
 x endpoints 0 and 1. Their y coordinates can extend beyond [0, 1], within −1 to 2
 (encoded sRGB units); see [tone curves](pointwise.md#tone-curves). Exposure must
 be within −5 to +5 EV. Temperature/tint, brightness, contrast, highlights/shadows, whites/blacks,
-vibrance and saturation must be within −1 to +1. Other scalar parameters must be
-finite; their ranges and algorithms await subsequent engine work.
+vibrance and saturation must be within −1 to +1. HSL band values, grading lightness and
+grading balance are also −1 to +1 (see [the HSL mixer](pointwise.md#hsl-mixer) and
+[color grading](pointwise.md#color-grading)). Grading hue (turns of OkLCh hue) and chroma
+are 0 to +1. Channel mixer coefficients are −2 to +2; rows are output channels in linear
+sRGB primaries, and monochrome outputs the luminance of the mixed color (see
+[the channel mixer](pointwise.md#channel-mixer-and-monochrome)). Defringe must be finite
+and is not yet rendered; nonzero values are rejected at render time. Out-of-range values
+are rejected, never rescaled.
 
 Color JSON flattens scalar fields inside `color`. `hsl`, when present, contains
 eight entries in red/orange/yellow/green/aqua/blue/purple/magenta order. `grading`
@@ -142,6 +148,19 @@ defaulting to zero. For example:
   }
 }
 ```
+
+The channel mixer is stored as `channel_mixer` (three rows of three coefficients) with
+`monochrome`. A black-and-white look sets all three rows equal to weights that sum to one
+and `monochrome: true`, for example an orange filter:
+
+```json
+{"color": {"monochrome": true, "channel_mixer": [[0.62, 0.35, 0.03], [0.62, 0.35, 0.03], [0.62, 0.35, 0.03]]}}
+```
+
+Setting `monochrome: false` afterwards without restoring `channel_mixer` leaves a gray
+image, because the equal rows remain; the desktop UI resets the matrix to the identity when
+monochrome is unchecked with equal rows. `Reset channel mixer` restores the identity and turns
+monochrome off.
 
 ## Custom nodes and remaining work
 

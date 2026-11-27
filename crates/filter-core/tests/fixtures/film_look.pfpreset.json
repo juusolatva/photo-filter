@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "process_version": 1,
+  "id": "0f6c1d52-8e0b-4f3a-9a77-2b5d9c4e1a10",
+  "name": "Muted Film Look",
+  "author": "fixture",
+  "tags": ["film", "split-tone"],
+  "patch": {
+    "tone": { "contrast": 0.1 },
+    "curves": { "master": [[0.0, 0.03], [0.25, 0.22], [0.75, 0.8], [1.0, 0.97]] },
+    "color": {
+      "saturation": -0.05,
+      "grading_balance": 0.1,
+      "hsl": [
+        null,
+        { "hue": 0.2, "saturation": 0.1, "lightness": 0.15 },
+        { "hue": -0.3, "saturation": -0.2, "lightness": 0.0 },
+        { "hue": -0.2, "saturation": -0.45, "lightness": -0.1 },
+        { "hue": 0.0, "saturation": -0.2, "lightness": 0.0 },
+        null,
+        null,
+        null
+      ],
+      "grading": [
+        { "hue": 0.72, "chroma": 0.2, "lightness": 0.1 },
+        null,
+        { "hue": 0.17, "chroma": 0.25, "lightness": 0.0 }
+      ]
+    },
+    "custom_stack_mode": "Replace"
+  }
+}

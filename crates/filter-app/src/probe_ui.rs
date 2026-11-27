@@ -1,8 +1,12 @@
 use eframe::egui;
-use filter_core::{ImageBuffer, cpu_eval::BasicAdjustments, probe::ProbeSample};
+use filter_core::{
+    ImageBuffer,
+    cpu_eval::{BasicAdjustments, BasicRows},
+    probe::ProbeSample,
+};
 use filter_gpu::GpuProbe;
 
-type Target = ([u32; 2], [[f32; 4]; 6]);
+type Target = ([u32; 2], BasicRows);
 #[derive(Default)]
 struct ProbeState {
     generation: u64,

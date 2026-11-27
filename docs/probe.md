@@ -28,7 +28,7 @@ samples show **Invalid pixel**.
 
 One compute invocation writes a 32-byte result, copied to one of two 32-byte
 asynchronous readback buffers. The input pixel and adjustment uniforms occupy
-16 and 96 bytes, respectively. Buffers and bindings persist across jobs; the
+16 and 256 bytes, respectively. Buffers and bindings persist across jobs; the
 payload is fixed regardless of image size. At most two jobs are pending, and
 pointer/edit changes coalesce to the latest request. No blocking GPU poll or
 readback runs on the UI thread. The app's ordinary nonblocking device poll drives

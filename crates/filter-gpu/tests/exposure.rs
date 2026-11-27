@@ -69,6 +69,14 @@ fn preview_basic_adjustments_encode_and_composite_alpha() {
                 mixed.tone.blacks = 0.1;
                 mixed.color.scalars.vibrance = 0.8;
                 mixed.color.scalars.saturation = -0.3;
+                mixed.color.hsl[0].hue = 0.8;
+                mixed.color.hsl[2].saturation = -0.5;
+                mixed.color.hsl[5].lightness = 0.6;
+                mixed.color.grading[1].chroma = 0.6;
+                mixed.color.grading[1].hue = 0.6;
+                mixed.color.grading[0].lightness = 0.5;
+                mixed.color.scalars.channel_mixer =
+                    [[1.2, -0.1, -0.1], [0.1, 0.9, 0.0], [-0.1, 0.2, 0.9]];
                 for settings in [
                     BasicAdjustments::default(),
                     BasicAdjustments::exposure(1.0).unwrap(),

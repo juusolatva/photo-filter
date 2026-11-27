@@ -51,15 +51,17 @@ pub fn rec2020_to_xyz(c: [f32; 3]) -> [f32; 3] {
 pub fn xyz_to_rec2020(c: [f32; 3]) -> [f32; 3] {
     transform(XYZ_REC2020, c)
 }
+/// Relative luminance weights of linear Rec.2020 (the Y row of its XYZ matrix).
+pub const REC2020_LUMA: [f32; 3] = [0.2627002, 0.67799807, 0.059301715];
+/// Linear sRGB primaries to linear Rec.2020. The channel mixer folds its
+/// matrix through this one and its f64 inverse (see `grading::fold_mixer`).
+pub const SRGB_TO_REC2020: Matrix3 = [
+    [0.6274039, 0.32928303, 0.043313067],
+    [0.06909729, 0.9195404, 0.011362316],
+    [0.01639144, 0.088013306, 0.89559525],
+];
 pub fn linear_srgb_to_rec2020(c: [f32; 3]) -> [f32; 3] {
-    transform(
-        [
-            [0.6274039, 0.32928303, 0.043313067],
-            [0.06909729, 0.9195404, 0.011362316],
-            [0.01639144, 0.088013306, 0.89559525],
-        ],
-        c,
-    )
+    transform(SRGB_TO_REC2020, c)
 }
 pub fn linear_p3_to_rec2020(c: [f32; 3]) -> [f32; 3] {
     transform(
@@ -83,6 +85,13 @@ pub fn rec2020_to_linear_p3(c: [f32; 3]) -> [f32; 3] {
 }
 
 pub fn rec2020_to_oklab(c: [f32; 3]) -> [f32; 3] {
+    rec2020_to_oklab_perturbed(c, [0.0; 3])
+}
+/// `rec2020_to_oklab` with each LMS cube root scaled by `1 + root_error[i]`.
+/// Zero errors are bit-identical. Used by conditioning tests that model the GPU's
+/// cube root accuracy; not part of the stable API.
+#[doc(hidden)]
+pub fn rec2020_to_oklab_perturbed(c: [f32; 3], root_error: [f32; 3]) -> [f32; 3] {
     let lms = transform(
         [
             [0.8190224, 0.36190626, -0.12887378],
@@ -92,6 +101,7 @@ pub fn rec2020_to_oklab(c: [f32; 3]) -> [f32; 3] {
         rec2020_to_xyz(c),
     )
     .map(f32::cbrt);
+    let lms = std::array::from_fn(|i| lms[i] * (1.0 + root_error[i]));
     transform(
         [
             [0.21045427, 0.7936178, -0.004072043],

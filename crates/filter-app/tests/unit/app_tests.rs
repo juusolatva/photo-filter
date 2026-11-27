@@ -5,7 +5,7 @@ use crate::export::ExportFormat;
 use crate::resize::ExportResize;
 use eframe::egui;
 use filter_core::{
-    edit::EditState,
+    edit::{EditState, GradingWheel, HslBand},
     preset::{Preset, Sections},
 };
 use std::path::{Path, PathBuf};
@@ -331,7 +331,7 @@ fn dialog_results_save_presets_export_and_open_images() {
     };
     let exported = dir.join("out.png");
     let job = request(Some(exported.clone()), &window.app);
-    window.send(DialogResult::Export(job));
+    window.send(DialogResult::Export(Box::new(job)));
     window.until("export", |app| app.export.is_none());
     assert_eq!(
         window.app.export_status,
@@ -340,13 +340,13 @@ fn dialog_results_save_presets_export_and_open_images() {
     assert_eq!(image::image_dimensions(&exported).unwrap(), (32, 16));
 
     let job = request(Some(dir.join("out.txt")), &window.app);
-    window.send(DialogResult::Export(job));
+    window.send(DialogResult::Export(Box::new(job)));
     assert!(window.app.export.is_none());
     let status = &window.app.export_status;
     assert!(status.starts_with("Could not start export:"), "{status}");
     // Cancelling the save dialog changes nothing.
     let job = request(None, &window.app);
-    window.send(DialogResult::Export(job));
+    window.send(DialogResult::Export(Box::new(job)));
     assert!(
         window
             .app
@@ -975,4 +975,180 @@ fn tone_curve_editor_adds_moves_and_removes_points_as_undo_steps() {
     window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
     assert_eq!(window.app.edit, EditState::default(), "the drag undone");
     assert!(window.app.adjustments.as_ref().unwrap().curves().is_none());
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn color_mixer_drags_and_resets_are_single_undo_steps() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image));
+    window.loaded();
+    assert!(has(&window.frame(), "Color mixer (HSL)"));
+    window.click("Color mixer (HSL)");
+    // The first "Red" painted is the mixer's band row; its slider is one row below.
+    let red = window.find("Red");
+    let start = egui::pos2(red.min.x + 40.0, red.center().y + 22.0);
+    window.press(start, true);
+    window.frame();
+    for step in 1..=5 {
+        window.events.push(egui::Event::PointerMoved(
+            start + egui::vec2(6.0 * step as f32, 0.0),
+        ));
+        window.frame();
+        assert!(window.app.edit_dirty && !window.app.history.can_undo());
+    }
+    window.press(start + egui::vec2(30.0, 0.0), false);
+    window.frame();
+    let dragged = window.app.edit.color.hsl[0].hue;
+    assert!(dragged != 0.0, "the drag changed the red hue");
+    assert_eq!(window.app.edit.color.hsl[1], HslBand::default());
+    assert!(!window.app.edit_dirty && window.app.history.can_undo());
+    let rows = window.app.adjustments.as_ref().unwrap().uniform_rows();
+    assert_eq!(rows[15][0], 1.0, "the HSL flag reaches the renderer");
+
+    // Per-channel reset, then undo.
+    window.click("Reset hue");
+    assert_eq!(window.app.edit, EditState::default());
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit.color.hsl[0].hue, dragged);
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit, EditState::default());
+
+    // Reset HSL clears every band in one step; other color controls stay.
+    window.app.edit.color.hsl[3].saturation = -0.5;
+    window.app.edit.color.hsl[6].lightness = 0.4;
+    window.app.edit.color.scalars.vibrance = 0.3;
+    window.app.edit_changed();
+    window.frame();
+    window.click("Reset HSL");
+    assert_eq!(window.app.edit.color.hsl, <[HslBand; 8]>::default());
+    assert_eq!(window.app.edit.color.scalars.vibrance, 0.3);
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit.color.hsl[3].saturation, -0.5);
+    assert_eq!(window.app.edit.color.hsl[6].lightness, 0.4);
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn color_grading_drags_and_resets_are_single_undo_steps() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image));
+    window.loaded();
+    assert!(has(&window.frame(), "Color grading"));
+    window.click("Color grading");
+    // "Highlights" is also a tone slider; the wheel tab is painted later.
+    let tab = window
+        .frame_shapes()
+        .into_iter()
+        .rev()
+        .find(|(text, _)| text == "Highlights")
+        .unwrap()
+        .1;
+    window.press(tab.center(), true);
+    window.frame();
+    window.press(tab.center(), false);
+    window.frame();
+    // The slider sits left of its "Chroma" label and value box.
+    let chroma = window.find("Chroma");
+    let start = egui::pos2(chroma.min.x - 150.0, chroma.center().y);
+    window.press(start, true);
+    window.frame();
+    for step in 1..=5 {
+        window.events.push(egui::Event::PointerMoved(
+            start + egui::vec2(6.0 * step as f32, 0.0),
+        ));
+        window.frame();
+        assert!(window.app.edit_dirty && !window.app.history.can_undo());
+    }
+    // Let the slider catch up with the pointer before releasing it.
+    window.frame();
+    window.press(start + egui::vec2(30.0, 0.0), false);
+    window.frame();
+    let dragged = window.app.edit.color.grading[2].chroma;
+    assert!(dragged != 0.0, "the drag changed highlights chroma");
+    assert_eq!(window.app.edit.color.grading[0], GradingWheel::default());
+    assert!(!window.app.edit_dirty && window.app.history.can_undo());
+    let rows = window.app.adjustments.as_ref().unwrap().uniform_rows();
+    assert_eq!(rows[15][1], 1.0, "the grading flag reaches the renderer");
+
+    // Per-wheel reset, then undo.
+    window.click("Reset highlights");
+    assert_eq!(window.app.edit, EditState::default());
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit.color.grading[2].chroma, dragged);
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit, EditState::default());
+
+    // Reset grading clears every wheel and the balance in one step only.
+    window.app.edit.color.grading[0].chroma = 0.5;
+    window.app.edit.color.grading[1].lightness = -0.4;
+    window.app.edit.color.scalars.grading_balance = 0.3;
+    window.app.edit.color.scalars.vibrance = 0.3;
+    window.app.edit_changed();
+    window.frame();
+    window.click("Reset grading");
+    assert_eq!(
+        window.app.edit.color.grading,
+        <[GradingWheel; 3]>::default()
+    );
+    assert_eq!(window.app.edit.color.scalars.grading_balance, 0.0);
+    assert_eq!(window.app.edit.color.scalars.vibrance, 0.3);
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert_eq!(window.app.edit.color.grading[0].chroma, 0.5);
+    assert_eq!(window.app.edit.color.scalars.grading_balance, 0.3);
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn channel_mixer_monochrome_presets_and_uncheck_are_single_undo_steps() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image));
+    window.loaded();
+    assert!(has(&window.frame(), "Channel mixer"));
+    window.click("Channel mixer");
+    window.click("Monochrome");
+    assert!(window.app.edit.color.scalars.monochrome);
+    // Switching on keeps the identity matrix: mono is exact luminance.
+    assert_eq!(
+        window.app.edit.color.scalars.channel_mixer,
+        filter_core::color::IDENTITY
+    );
+    let rows = *window.app.adjustments.as_ref().unwrap().uniform_rows();
+    assert_eq!(rows[0], rows[1]);
+    assert_eq!(rows[1], rows[2]);
+
+    window.click("Panchromatic");
+    let weights = [0.30, 0.58, 0.12];
+    assert_eq!(window.app.edit.color.scalars.channel_mixer, [weights; 3]);
+    assert!(window.app.history.can_undo());
+
+    // Unchecking with equal rows resets the matrix, as one step.
+    window.click("Monochrome");
+    assert!(!window.app.edit.color.scalars.monochrome);
+    assert_eq!(
+        window.app.edit.color.scalars.channel_mixer,
+        filter_core::color::IDENTITY
+    );
+    assert_eq!(
+        window.app.adjustments.as_ref().unwrap().uniform_rows()[..3],
+        {
+            let neutral = *filter_core::cpu_eval::BasicAdjustments::default().uniform_rows();
+            [neutral[0], neutral[1], neutral[2]]
+        }
+    );
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert!(window.app.edit.color.scalars.monochrome);
+    assert_eq!(window.app.edit.color.scalars.channel_mixer, [weights; 3]);
+
+    // Reset channel mixer returns to the neutral edit in one step.
+    window.click("Reset channel mixer");
+    assert_eq!(window.app.edit, EditState::default());
+    window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
+    assert!(window.app.edit.color.scalars.monochrome);
 }
