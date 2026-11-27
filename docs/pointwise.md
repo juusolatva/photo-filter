@@ -2,7 +2,8 @@
 
 The desktop app renders Exposure, relative Temperature/Tint, Brightness, Contrast,
 Highlights/Shadows, Whites/Blacks, the channel mixer and monochrome, master/red/green/blue
-tone curves, the 8-band HSL mixer, Vibrance and Saturation, then the three-wheel color grading.
+tone curves, the 8-band HSL mixer, Vibrance and Saturation, then the three-wheel color grading,
+and last an optional `.cube` look ([Cube LUT](#cube-lut-look)).
 The mixer is folded into the white-balance matrix, so it runs right after exposure and
 before tone; see [stage order](#channel-mixer-and-monochrome). The controls leave the
 source untouched and feed both the proxy viewport and PNG/JPEG/WebP/TIFF export.
@@ -377,6 +378,74 @@ renderer (`ExposureRenderer::set_curves`, called from the paint callback), so
 per-tile uniforms stay small. Other paths write their own table before each
 submission.
 
+## Cube LUT (look)
+
+An imported `.cube` 3D LUT is stored in `Finishing.lut` (`LutSlot`) with
+`Finishing.lut_strength` (0 to 1) and runs after the color stage and before alpha. Stage
+order: exposure/white balance/mixer, tone, curves, color stage (HSL, vibrance/saturation,
+grading), **LUT**. Vignette and grain are not implemented; when they are, they come after the
+LUT so grain is not graded by the look. The stage is skipped, bit-exactly, when no LUT is
+present or the strength is 0. It is a wrapper around the existing adjustment body
+(`apply_basic` over `apply_adjust` in WGSL, `pixel_perturbed` over `adjust_perturbed` in
+the CPU reference), so the neutral and color-only early returns are unchanged.
+
+```
+if any_nonfinite(rgb) { return rgb }          // same exponent-bit test on CPU and GPU
+lin = working → linear sRGB primaries
+e   = mirrored sRGB encode(lin)               // per channel, as in the curve stage
+v   = clamp(e, domain_min, domain_max)
+t   = clamp((v - domain_min) * inv, 0, 1)     // inv = 1 / (domain_max - domain_min), f32
+L   = tetrahedral(t)                          // absolute encoded sRGB, not rescaled
+e2  = e + strength * (L - v)
+out = linear sRGB → working(mirrored sRGB decode(e2))
+```
+
+`DOMAIN_MIN`/`DOMAIN_MAX` (or `LUT_3D_INPUT_RANGE`) map the **input** only; the file's
+output values are absolute encoded sRGB. Input outside the domain is clamped for the lookup
+and its residual `e - v` passes through at unit slope, so HDR, negative and wide-gamut
+values stay finite and continuous at the domain edge instead of flattening to the lattice
+edge. The slope is discontinuous at that edge. This is not gamut mapping; display and
+export still clip to sRGB. Strength mixes in encoded sRGB, so 50% looks halfway on screen,
+and an identity LUT stays the identity. Alpha is untouched.
+
+**Assumption:** the file carries no color-space metadata, so the LUT is treated as expecting
+sRGB-encoded input and output. LUTs made for log, Rec.709 gamma or video-range input will
+look wrong, and the panel says so. `LUT_1D_*`, video-range keywords and unknown keywords are
+rejected rather than ignored.
+
+**Interpolation** is tetrahedral with explicit f32 arithmetic over `textureLoad` on a
+`texture_3d<f32>` (`Rgba16Float`, x = R, y = G, z = B, R fastest in the file and the
+texture); no sampler or hardware filtering is used. The cell index is
+`min(trunc(t * (N - 1)), N - 2)` and the fraction orders the three axes with `>=` ties
+resolved in one fixed order; the result is `((c0 + w1 d1) + w2 d2) + w3 d3` over the walk
+from corner 000 to 111. The CPU reference (`CubeLut::tetra`) uses the same branches and
+order and does not use `mul_add`; the shader compiler may contract to FMA, a difference of
+about one ulp inside the existing tolerances, which are unchanged. On the gray axis the
+result equals the diagonal lerp.
+
+**Lattice precision.** Values are rounded to f16 once, at load, so the CPU and the GPU
+interpolate the same lattice (6 bytes per node, 1.65 MB at N = 65). Interpolation between
+nodes is f32 and continuous, but the lattice carries f16 quantization (a step of up to
+2^-11 near 1), up to about 0.12 of an 8-bit step on a smooth gradient in a 16-bit export.
+Output is not bit-accurate to the decimal values in the file. Lattice values must satisfy
+`|v| <= 8`.
+
+**GPU plumbing.** The LUT lives outside `BasicParams`, which stays 256 bytes. Each of the
+viewport, tiled, histogram and probe shaders declares binding 4 (`lut_tex`) and binding 5
+(`lutp: LutParams`, 48 bytes: domain minimum and strength, domain maximum and an active
+flag, reciprocal width and `N - 1`). The shared `lut.wgsl` holds `lut_at`, `lut_tetra` and
+`lut_stage`. The viewport, histogram and probe each own one fixed 65^3 texture and params
+buffer, so their bind groups never go stale and a smaller LUT uploads into a sub-extent.
+Tiled export creates one exactly sized texture per distinct LUT and a 1x1x1 dummy when none
+is active. `set_lut` always writes the 48 bytes, and uploads the lattice only for a
+different lattice, so a strength drag never re-uploads. The upload is a queue write; there is
+no polling or readback. A size above the device 3D texture limit returns an error and the
+viewport then renders without the LUT.
+
+Neutrality audit: `BasicAdjustments::is_neutral()` is false for a LUT-only edit, and the
+histogram/probe change detection compares the LUT together with the uniform rows
+(`snapshot.rs`). Adding a stage that is neutral in `uniform_rows()` must update both.
+
 ## Output and verification
 
 The viewport unpremultiplies its alpha-weighted source texture before these
@@ -417,6 +486,11 @@ Newton-refined to within about one ulp of the CPU `cbrt`. A CPU conditioning tes
 Oklab cube roots by a relative 1.2e-7 (one ulp for roots in [0.5, 1)) and requires the HSL
 output to move by less than `2e-5 * (1 + |x|)`. HSL is steep enough that larger root errors
 can exceed that bound with strongly opposed adjacent bands (about 1.9x at 2.5 ulp), so the
-Newton step is required for parity. Tiled and untiled output
+Newton step is required for parity. LUT tests cover the parser (grammar, limits, rejected keywords, a mutation sweep), lattice
+exactness, all six tetrahedra and tie rules against a brute-force evaluation, the gray axis,
+the out-of-domain policy, strength 0 and 1, non-finite pixels, and software-adapter parity of
+the viewport f32 path and the f16 tile path (N = 2, 17 and 65, domains other than 0..1,
+alpha, negative and above-1 pixels) plus histogram, probe, upload caching and a neutral edit
+bit-exact with the no-LUT output. Tiled and untiled output
 must match exactly. Separate viewport and PNG/JPEG/WebP/TIFF integration tests exercise
 uniform layout, output transfer, alpha and the captured adjustment snapshot.

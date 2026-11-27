@@ -34,7 +34,7 @@ pointer/edit changes coalesce to the latest request. No blocking GPU poll or
 readback runs on the UI thread. The app's ordinary nonblocking device poll drives
 callbacks and pending jobs request a repaint.
 
-Pointer-pixel, adjustment and image changes invalidate the displayed sample
+Pointer-pixel, adjustment (including a tone curve point, LUT or strength change that leaves the uniform rows unchanged) and image changes invalidate the displayed sample
 before completed callbacks are collected. Older samples and errors cannot replace
 the current target. Moving within the same source pixel or repainting an idle UI
 submits no extra work. Leaving the image clears the readout. A current mapping

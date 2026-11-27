@@ -143,3 +143,30 @@ fn undoing_past_large_edits_evicts_the_furthest_redo() {
     assert_eq!(history.redo(&exposure(0.0)), Some(near.clone()));
     assert_eq!(history.redo(&near), None, "the furthest redo was dropped");
 }
+
+#[test]
+fn a_hundred_steps_with_one_65_cubed_lut_stay_within_budget_and_keep_the_lut_step() {
+    use filter_core::lut::{CubeLut, LutSlot};
+    let n = 65;
+    let texels = vec![0u16; 3 * n * n * n];
+    let lut = std::sync::Arc::new(CubeLut::new(n, "big", [0.0; 3], [1.0; 3], texels).unwrap());
+    let mut edit = EditState::default();
+    let mut history = History::new(&edit);
+    for i in 1..=100 {
+        edit.calibration.exposure = i as f32 * 0.01;
+        if i == 50 {
+            edit.finishing.lut = LutSlot::Cube(lut.clone());
+        }
+        assert!(history.commit(&edit));
+    }
+    let (undo, redo, bytes) = history.retained();
+    assert!(bytes <= MAX_BYTES, "{bytes}");
+    assert!(undo > 0 && undo <= MAX_STEPS && redo == 0);
+    // LUT steps are retained (the oldest are evicted by the byte budget), and
+    // undo then redo walks through them.
+    let mut live = history.undo(&edit).unwrap();
+    assert_eq!(live.finishing.lut, LutSlot::Cube(lut.clone()));
+    assert!(live.calibration.exposure < edit.calibration.exposure);
+    live = history.redo(&live).unwrap();
+    assert_eq!(live, edit);
+}

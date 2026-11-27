@@ -27,6 +27,13 @@ are preserved without noise. Noise depends on pixel/channel index and seed,
 so changing tile, band or TIFF strip boundaries does not change it. Sixteen-bit PNG/TIFF always quantize
 without dithering. Gamut compression and other output color spaces remain pending.
 
+The active `.cube` LUT and its strength are part of the immutable export snapshot taken when
+the save dialog opens, so replacing or removing the LUT, or changing its strength, during an
+export does not affect it. The LUT applies in every format and size, before resizing and output
+conversion. Tiled export uploads one exactly sized LUT texture per export (not per tile), and
+it is exported as rendered, not as a `.cube` file: `.cube` export is not implemented.
+The f16 lattice carries its quantization into 16-bit output (see [the LUT stage](pointwise.md#cube-lut-look)).
+
 Resizing area-filters the rendered full-resolution row bands on the CPU, after all
 implemented pointwise adjustments and before output color conversion, alpha flattening,
 dithering and quantization. It averages premultiplied linear Rec.2020 RGB and alpha,

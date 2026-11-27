@@ -1,7 +1,13 @@
 //! Concrete edit parameters. Basic calibration, tone (except clarity), tone curves,
-//! vibrance, saturation, the HSL mixer, grading and the channel mixer or monochrome
-//! render today; other sections reserve their preset contracts.
+//! vibrance, saturation, the HSL mixer, grading, the channel mixer or monochrome and
+//! the Finishing `.cube` LUT (`lut`, `lut_strength`) render today; vignette, grain and
+//! the other sections reserve their preset contracts.
+//!
+//! `EditState` serialization is unversioned and only presets write it. A preset that
+//! embeds a LUT is schema v2 so that older readers reject it instead of dropping the
+//! unknown `finishing.lut` key silently.
 use crate::grading::MIXER_LIMIT;
+use crate::lut::LutSlot;
 use crate::pipeline::FilterNode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -140,6 +146,8 @@ section!(
         grain_amount: f32 = 0.0,
         grain_size: f32 = 1.0,
         grain_roughness: f32 = 0.5,
+        lut: LutSlot = LutSlot::None,
+        lut_strength: f32 = 1.0,
     }
 );
 
@@ -483,7 +491,7 @@ impl EditState {
                     }
             })
             .sum::<usize>();
-        std::mem::size_of::<Self>() + curves + nodes
+        std::mem::size_of::<Self>() + curves + nodes + self.finishing.lut.estimated_bytes()
     }
 
     pub fn validate(&self) -> Result<(), ModelError> {
@@ -517,6 +525,11 @@ impl EditState {
         self.color.validate()?;
         self.detail.validate()?;
         self.finishing.validate()?;
+        within(
+            "finishing.lut_strength",
+            self.finishing.lut_strength,
+            0.0..=1.0,
+        )?;
         if self.custom_stack.len() > MAX_STACK_NODES {
             return Err(ModelError(format!(
                 "custom stack exceeds {MAX_STACK_NODES} nodes"

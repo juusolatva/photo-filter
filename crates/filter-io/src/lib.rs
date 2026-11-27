@@ -7,6 +7,7 @@ use moxcms::{ColorProfile, DataColorSpace, Layout, ToneReprCurve, TransformOptio
 use std::path::Path;
 
 mod export;
+pub mod lut;
 pub mod preset;
 pub use export::{
     JpegOptions, PngBitDepth, PngOptions, TiffBitDepth, TiffOptions, WebPOptions, write_srgb_png,

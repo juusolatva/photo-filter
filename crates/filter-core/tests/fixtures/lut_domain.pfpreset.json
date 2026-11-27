@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "process_version": 1,
+  "id": "c4d7e1a3-9f20-4b68-8c35-1a7e6d2b0f93",
+  "name": "Wide domain",
+  "author": "fixture",
+  "tags": [
+    "lut"
+  ],
+  "patch": {
+    "finishing": {
+      "lut_strength": 1.0,
+      "lut": {
+        "kind": "cube",
+        "title": "Wide domain",
+        "size": 2,
+        "domain_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "domain_max": [
+          1.5,
+          1.5,
+          1.5
+        ],
+        "encoding": "f16-shuffle-zlib-v1",
+        "data": "eJxjYMAOduzYYQfGdmDKDsyys7MDAKRYC4k="
+      }
+    },
+    "custom_stack_mode": "Replace"
+  }
+}

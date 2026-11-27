@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "process_version": 1,
+  "id": "d1e8f2a6-7b3c-4095-8e4d-0f6a1c9b5e37",
+  "name": "Corrupt",
+  "author": "fixture",
+  "tags": [
+    "lut"
+  ],
+  "patch": {
+    "finishing": {
+      "lut_strength": 1.0,
+      "lut": {
+        "kind": "cube",
+        "title": "Identity 2",
+        "size": 2,
+        "domain_min": [
+          0,
+          0,
+          0
+        ],
+        "domain_max": [
+          1,
+          1,
+          1
+        ],
+        "encoding": "f16-shuffle-zlib-v1",
+        "data": "eJxjYMAJbMDYBkzZgFk2AAAAAAAAAAAA"
+      }
+    },
+    "custom_stack_mode": "Replace"
+  }
+}

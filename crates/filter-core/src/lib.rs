@@ -5,6 +5,7 @@ pub mod curve;
 pub mod edit;
 pub mod grading;
 pub mod histogram;
+pub mod lut;
 pub mod pipeline;
 pub mod preset;
 pub mod probe;

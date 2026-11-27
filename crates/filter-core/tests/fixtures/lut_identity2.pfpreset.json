@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "process_version": 1,
+  "id": "3b1f6d0e-52c4-4a8e-9d17-6a0c2e7f4b11",
+  "name": "Identity 2",
+  "author": "fixture",
+  "tags": [
+    "lut"
+  ],
+  "patch": {
+    "finishing": {
+      "lut_strength": 1.0,
+      "lut": {
+        "kind": "cube",
+        "title": "Identity 2",
+        "size": 2,
+        "domain_min": [
+          0,
+          0,
+          0
+        ],
+        "domain_max": [
+          1,
+          1,
+          1
+        ],
+        "encoding": "f16-shuffle-zlib-v1",
+        "data": "eJxjYMAJbMDYBkzZgFk2NjYAGYAC0Q=="
+      }
+    },
+    "custom_stack_mode": "Replace"
+  }
+}

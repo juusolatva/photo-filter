@@ -1,4 +1,4 @@
-use super::{BasicAdjustments, Histogram, HistogramState, HistogramUi, egui};
+use super::{BasicAdjustments, Histogram, HistogramState, HistogramUi, RenderSnapshot, egui};
 fn histogram(n: u32) -> Histogram {
     Histogram {
         transparent: n,
@@ -8,8 +8,8 @@ fn histogram(n: u32) -> Histogram {
 #[test]
 fn image_changes_reject_old_results_even_when_adjustments_match() {
     let mut state = HistogramState::default();
-    let settings = Some(*BasicAdjustments::default().uniform_rows());
-    state.set_settings(settings);
+    let settings = Some(RenderSnapshot::new(&BasicAdjustments::default()));
+    state.set_settings(settings.clone());
     let old = state.generation;
     state.reset();
     state.set_settings(settings);
@@ -22,20 +22,20 @@ fn image_changes_reject_old_results_even_when_adjustments_match() {
 #[test]
 fn edits_coalesce_and_stale_errors_cannot_replace_current_data() {
     let mut state = HistogramState::default();
-    state.set_settings(Some(*BasicAdjustments::default().uniform_rows()));
+    state.set_settings(Some(RenderSnapshot::new(&BasicAdjustments::default())));
     let old = state.generation;
     state.accept(old, Ok(histogram(1)));
     state.submitted = Some(old);
-    state.set_settings(Some(
-        *BasicAdjustments::exposure(1.0).unwrap().uniform_rows(),
-    ));
+    state.set_settings(Some(RenderSnapshot::new(
+        &BasicAdjustments::exposure(1.0).unwrap(),
+    )));
     let latest = state.generation;
     assert!(!state.current());
     assert_eq!(state.display.as_ref().unwrap().1.transparent, 1);
     assert!(state.submitted.is_none());
-    state.set_settings(Some(
-        *BasicAdjustments::exposure(1.0).unwrap().uniform_rows(),
-    ));
+    state.set_settings(Some(RenderSnapshot::new(
+        &BasicAdjustments::exposure(1.0).unwrap(),
+    )));
     assert_eq!(state.generation, latest); // Idle repaint or pan/zoom changes nothing.
     state.accept(latest, Ok(histogram(3)));
     state.accept(old, Err("old failure".into()));
@@ -45,9 +45,27 @@ fn edits_coalesce_and_stale_errors_cannot_replace_current_data() {
     assert_eq!(state.display.unwrap().1.transparent, 3);
 }
 #[test]
+fn a_curve_point_change_with_unchanged_rows_bumps_the_generation() {
+    use filter_core::edit::{Curve, EditState};
+    let adjustments = |y: f32| {
+        let mut edit = EditState::default();
+        edit.curves.master = Curve(vec![[0.0, 0.0], [0.5, y], [1.0, 1.0]]);
+        BasicAdjustments::new(&edit).unwrap()
+    };
+    let mut state = HistogramState::default();
+    state.set_settings(Some(RenderSnapshot::new(&adjustments(0.6))));
+    let before = state.generation;
+    state.submitted = Some(before);
+    state.set_settings(Some(RenderSnapshot::new(&adjustments(0.6))));
+    assert_eq!(state.generation, before);
+    state.set_settings(Some(RenderSnapshot::new(&adjustments(0.4))));
+    assert_eq!(state.generation, before + 1);
+    assert!(state.submitted.is_none());
+}
+#[test]
 fn unsupported_edits_clear_display_and_failures_can_retry_same_source() {
     let mut state = HistogramState::default();
-    state.set_settings(Some(*BasicAdjustments::default().uniform_rows()));
+    state.set_settings(Some(RenderSnapshot::new(&BasicAdjustments::default())));
     let generation = state.generation;
     state.submitted = Some(generation);
     state.accept(generation, Err("mapping failure".into()));
@@ -107,7 +125,7 @@ fn histogram_ui_coalesces_edits_and_refreshes_the_reserved_panel() {
         histogram.refresh(&device, &queue, Some(&source), Some(&bright));
         histogram.refresh(&device, &queue, Some(&source), Some(&latest));
         assert!(histogram.is_pending());
-        assert_eq!(histogram.state.settings, Some(*latest.uniform_rows()));
+        assert_eq!(histogram.state.settings, Some(RenderSnapshot::new(&latest)));
         // A queue submission may already have completed an older map. The
         // latest edit either uses that free slot or waits for one to open.
         assert!(

@@ -51,9 +51,9 @@ fn imports_reject_oversized_invalid_utf8_and_new_versions() {
     assert!(read(&path).unwrap_err().to_string().contains("16 MiB"));
     std::fs::write(&path, [0xff]).unwrap();
     assert!(read(&path).unwrap_err().to_string().contains("UTF-8"));
-    std::fs::write(&path, r#"{"schema_version":2}"#).unwrap();
+    std::fs::write(&path, r#"{"schema_version":3}"#).unwrap();
     assert!(
-        format!("{:#}", read(&path).unwrap_err()).contains("unsupported preset schema version 2")
+        format!("{:#}", read(&path).unwrap_err()).contains("unsupported preset schema version 3")
     );
 }
 
@@ -178,4 +178,27 @@ fn linked_saves_update_target_and_preserve_link_and_target_permissions() {
             .is_symlink()
     );
     assert!(!dir.path().join("missing.json").exists());
+}
+
+#[test]
+fn lut_presets_round_trip_and_failed_saves_preserve_the_destination() {
+    use filter_core::lut::{LutSlot, parse_cube};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("look.json");
+    let text = "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+    let mut edit = EditState::default();
+    edit.finishing.lut = LutSlot::Cube(std::sync::Arc::new(parse_cube(text.as_bytes()).unwrap()));
+    edit.finishing.lut_strength = 0.5;
+    let mut preset = Preset::capture("Look", &edit, &Sections::ALL).unwrap();
+    write(&path, &preset).unwrap();
+    assert_eq!(read(&path).unwrap(), preset);
+    let saved = std::fs::read(&path).unwrap();
+    // A v1 label with an embedded LUT is invalid, and so is an oversized name.
+    preset.name = "x".repeat(MAX_PRESET_BYTES);
+    assert!(write(&path, &preset).is_err());
+    preset.name = "Look".into();
+    preset.schema_version = filter_core::preset::SchemaVersion::V1;
+    assert!(write(&path, &preset).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), saved);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }

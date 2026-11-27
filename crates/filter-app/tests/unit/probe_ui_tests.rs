@@ -49,26 +49,26 @@ fn pointer_mapping_handles_letterbox_pan_zoom_and_display_scale() {
 #[test]
 fn rapid_pointer_edits_image_changes_and_leaving_reject_old_results() {
     let mut s = ProbeState::default();
-    let settings = *BasicAdjustments::default().uniform_rows();
-    s.set_target(Some(([1, 2], settings)));
+    let settings = RenderSnapshot::new(&BasicAdjustments::default());
+    s.set_target(Some(([1, 2], settings.clone())));
     let old = s.generation;
     s.submitted = Some(old);
     s.accept(old, Ok(ProbeSample::Transparent));
-    s.set_target(Some(([2, 2], settings)));
+    s.set_target(Some(([2, 2], settings.clone())));
     assert!(s.display.is_none() && s.submitted.is_none());
     s.accept(old, Err("old failure".into()));
     assert!(s.error.is_none());
     s.set_target(Some((
         [2, 2],
-        *BasicAdjustments::exposure(1.0).unwrap().uniform_rows(),
+        RenderSnapshot::new(&BasicAdjustments::exposure(1.0).unwrap()),
     )));
     let edit = s.generation;
     s.reset(); // New image, even at identical pointer/settings.
-    s.set_target(Some(([2, 2], settings)));
+    s.set_target(Some(([2, 2], settings.clone())));
     s.accept(edit, Ok(ProbeSample::Transparent));
     assert!(s.display.is_none());
     let current = s.generation;
-    s.set_target(s.target);
+    s.set_target(s.target.clone());
     assert_eq!(s.generation, current); // Idle and movement inside same pixel.
     s.accept(current, Err("map failure".into()));
     s.retry();
@@ -78,6 +78,24 @@ fn rapid_pointer_edits_image_changes_and_leaving_reject_old_results() {
     s.set_target(None);
     s.accept(current, Ok(ProbeSample::Transparent));
     assert!(s.display.is_none());
+}
+#[test]
+fn a_curve_point_change_with_unchanged_rows_invalidates_the_target() {
+    use filter_core::edit::{Curve, EditState};
+    let snapshot = |y: f32| {
+        let mut edit = EditState::default();
+        edit.curves.master = Curve(vec![[0.0, 0.0], [0.5, y], [1.0, 1.0]]);
+        RenderSnapshot::new(&BasicAdjustments::new(&edit).unwrap())
+    };
+    let mut s = ProbeState::default();
+    s.set_target(Some(([1, 2], snapshot(0.6))));
+    let old = s.generation;
+    s.submitted = Some(old);
+    s.accept(old, Ok(ProbeSample::Transparent));
+    assert!(s.display.is_some());
+    s.set_target(Some(([1, 2], snapshot(0.4))));
+    assert_eq!(s.generation, old + 1);
+    assert!(s.display.is_none() && s.submitted.is_none());
 }
 /// Paint the readout into its reserved panel space and return its text,
 /// checking that every state fits above the following controls.
@@ -128,7 +146,7 @@ fn unavailable_gpu_explains_without_offering_retry() {
         gpu: Err("Device limits cannot support the color probe".into()),
         state: ProbeState::default(),
     };
-    probe.state.target = Some(([1, 2], *BasicAdjustments::default().uniform_rows()));
+    probe.state.target = Some(([1, 2], RenderSnapshot::new(&BasicAdjustments::default())));
     let text = rendered_text(&mut probe);
     assert!(has(&text, "Color probe unavailable"));
     // Retrying cannot recover a device that lacks the required limits.
@@ -255,7 +273,7 @@ fn probe_ui_samples_original_pixels_coalesces_and_paints_reserved_space() {
     assert!(has(&text, "Hover over the image"));
 
     // Every remaining readout state explains itself within the reserved space.
-    probe.state.target = Some(([7, 0], *neutral.uniform_rows()));
+    probe.state.target = Some(([7, 0], RenderSnapshot::new(&neutral)));
     for (display, line) in [
         (Some(ProbeSample::Transparent), "Transparent · alpha 0%"),
         (

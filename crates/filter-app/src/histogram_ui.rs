@@ -1,6 +1,7 @@
+use crate::snapshot::RenderSnapshot;
 use eframe::egui;
 use filter_core::{
-    cpu_eval::{BasicAdjustments, BasicRows},
+    cpu_eval::BasicAdjustments,
     histogram::{BINS, Histogram},
 };
 use filter_gpu::{GpuHistogram, SourceTexture};
@@ -8,7 +9,7 @@ use filter_gpu::{GpuHistogram, SourceTexture};
 #[derive(Default)]
 struct HistogramState {
     generation: u64,
-    settings: Option<BasicRows>,
+    settings: Option<RenderSnapshot>,
     submitted: Option<u64>,
     display: Option<(u64, Histogram)>,
     error: Option<String>,
@@ -21,13 +22,14 @@ impl HistogramState {
         self.display = None;
         self.error = None;
     }
-    fn set_settings(&mut self, settings: Option<BasicRows>) {
+    fn set_settings(&mut self, settings: Option<RenderSnapshot>) {
         if self.settings != settings {
             self.generation += 1;
+            let cleared = settings.is_none();
             self.settings = settings;
             self.submitted = None;
             self.error = None;
-            if settings.is_none() {
+            if cleared {
                 self.display = None;
             }
         }
@@ -87,7 +89,7 @@ impl HistogramUi {
         settings: Option<&BasicAdjustments>,
     ) {
         self.has_source = source.is_some();
-        let snapshot = source.and(settings).map(|s| *s.uniform_rows());
+        let snapshot = source.and(settings).map(RenderSnapshot::new);
         // Determine the current generation before consuming any completed maps.
         self.state.set_settings(snapshot);
         let Ok(gpu) = &mut self.gpu else {

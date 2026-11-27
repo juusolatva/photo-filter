@@ -1152,3 +1152,152 @@ fn channel_mixer_monochrome_presets_and_uncheck_are_single_undo_steps() {
     window.shortcut(egui::Modifiers::COMMAND, egui::Key::Z);
     assert!(window.app.edit.color.scalars.monochrome);
 }
+
+fn cube_file(title: &str, invert: bool) -> Box<crate::lut_ui::Loaded> {
+    let mut text = format!("TITLE \"{title}\"\nLUT_3D_SIZE 2\n");
+    for b in 0..2 {
+        for g in 0..2 {
+            for r in 0..2 {
+                let v = [r, g, b].map(|c| if invert { 1 - c } else { c });
+                text.push_str(&format!("{} {} {}\n", v[0], v[1], v[2]));
+            }
+        }
+    }
+    Box::new(crate::lut_ui::Loaded {
+        lut: filter_core::lut::parse_cube(text.as_bytes()).unwrap(),
+        file_name: "look.cube".into(),
+    })
+}
+fn load_lut(window: &mut Window, generation: u64, file: Box<crate::lut_ui::Loaded>) {
+    window.send(DialogResult::LutLoad {
+        generation,
+        result: Some(Ok(file)),
+    });
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn lut_load_strength_remove_and_failures_are_single_undo_steps() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image));
+    window.loaded();
+    let generation = window.app.generation;
+
+    // Failures, cancellation and stale results leave the edit and history alone.
+    window.send(DialogResult::LutLoad {
+        generation,
+        result: Some(Err("line 4: expected 3 values".into())),
+    });
+    assert_eq!(
+        window.app.lut_ui.status,
+        "Could not load LUT: line 4: expected 3 values"
+    );
+    window.send(DialogResult::LutLoad {
+        generation,
+        result: None,
+    });
+    load_lut(&mut window, generation - 1, cube_file("Stale", true));
+    assert_eq!(window.app.edit, EditState::default());
+    assert!(!window.app.can_undo());
+    assert!(window.app.lut_ui.status.is_empty());
+
+    // A load is one undo step and reaches the renderer snapshot.
+    load_lut(&mut window, generation, cube_file("Film", true));
+    window.frame();
+    let loaded = window.app.edit.finishing.lut.cube().unwrap().clone();
+    assert_eq!(loaded.title(), "Film");
+    assert!(window.app.adjustments.as_ref().unwrap().lut().is_some());
+    assert!(window.app.history.can_undo() && !window.app.edit_dirty);
+    assert_eq!(window.app.edit.finishing.lut_strength, 1.0);
+
+    // An identical LUT interns: same Arc, no new step.
+    load_lut(&mut window, generation, cube_file("Film", true));
+    window.frame();
+    assert!(Arc::ptr_eq(
+        &loaded,
+        window.app.edit.finishing.lut.cube().unwrap()
+    ));
+    assert!(!window.app.edit_dirty);
+    window.click("Undo");
+    assert_eq!(window.app.edit, EditState::default(), "one step undone");
+    window.click("Redo");
+    assert_eq!(
+        window.app.edit.finishing.lut.cube().unwrap().title(),
+        "Film"
+    );
+
+    // A strength drag is one step.
+    window.click("Look (LUT)");
+    assert!(has(&window.frame(), "Film"));
+    let left = window.find("Look (LUT)").min.x;
+    let row = window.find("Strength %").center().y;
+    let start = egui::pos2(left + 30.0, row);
+    window.press(start, true);
+    window.frame();
+    for step in 1..=4 {
+        let pos = start - egui::vec2(8.0 * step as f32, 0.0);
+        window.events.push(egui::Event::PointerMoved(pos));
+        window.frame();
+        assert!(
+            window.app.edit_dirty,
+            "a drag in progress is not yet a step"
+        );
+    }
+    window.press(start - egui::vec2(32.0, 0.0), false);
+    window.frame();
+    let strength = window.app.edit.finishing.lut_strength;
+    assert!(strength < 1.0, "the drag lowered strength: {strength}");
+    assert!(!window.app.edit_dirty);
+    window.click("Undo");
+    assert_eq!(window.app.edit.finishing.lut_strength, 1.0);
+    assert!(window.app.edit.finishing.lut.cube().is_some());
+    window.click("Redo");
+
+    // Remove clears the LUT and resets strength, as one step.
+    window.click("Remove");
+    assert_eq!(window.app.edit, EditState::default());
+    assert!(window.app.adjustments.as_ref().unwrap().lut().is_none());
+    window.click("Undo");
+    assert_eq!(window.app.edit.finishing.lut_strength, strength);
+    assert!(window.app.edit.finishing.lut.cube().is_some());
+}
+
+#[test]
+#[ignore = "requires a Vulkan/DX12/Metal software adapter"]
+fn applying_a_preset_with_a_lut_is_one_step_and_interns_an_identical_lut() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("photo.png");
+    write_image(&image, 64, 32);
+    let mut window = Window::new(Some(image));
+    window.loaded();
+    let mut look = EditState::default();
+    look.finishing.lut = filter_core::lut::LutSlot::Cube(Arc::new(cube_file("Look", true).lut));
+    look.finishing.lut_strength = 0.5;
+    let preset = Preset::capture("Look", &look, &Sections::ALL).unwrap();
+    let preset = Preset::from_json(&preset.to_json().unwrap()).unwrap();
+    let apply = |window: &mut Window, preset: &Preset| {
+        window.send(DialogResult::PresetLoad {
+            generation: window.app.generation,
+            result: Some(Ok(Box::new(preset.clone()))),
+        });
+        window.click("Apply selected sections");
+    };
+    apply(&mut window, &preset);
+    assert_eq!(window.app.edit, look);
+    assert!(window.app.adjustments.as_ref().unwrap().lut().is_some());
+    window.frame();
+    assert!(window.app.history.can_undo());
+    let applied = window.app.edit.finishing.lut.cube().unwrap().clone();
+
+    // Applying it again shares the payload and records nothing new.
+    apply(&mut window, &preset);
+    window.frame();
+    assert!(Arc::ptr_eq(
+        &applied,
+        window.app.edit.finishing.lut.cube().unwrap()
+    ));
+    window.click("Undo");
+    assert_eq!(window.app.edit, EditState::default(), "a single step");
+}

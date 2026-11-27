@@ -47,6 +47,11 @@ impl egui_wgpu::CallbackTrait for PreviewCallback {
         self.renderer
             .set_clipping_overlay(queue, self.clipping.shadows, self.clipping.highlights);
         self.renderer.set_curves(queue, &self.adjustments);
+        // Fails only for a lattice beyond the device 3D texture limit, which the
+        // fixed 65^3 texture rules out; the LUT stage is then switched off.
+        if let Err(error) = self.renderer.set_lut(queue, &self.adjustments) {
+            eprintln!("Could not upload the LUT: {error:#}");
+        }
         Vec::new()
     }
     fn paint(

@@ -54,7 +54,7 @@ so retry does not reuse uncertain mapping state or raise an unmapped-buffer vali
 
 The app coalesces edit changes to its latest desired generation and rejects old
 completions and errors. Successful image replacement invalidates old generations even
-if the new image uses identical settings. Pan/zoom and idle repaints submit no work.
+if the new image uses identical settings. A change to the uniform rows, the baked tone curves (compared by content) or the LUT starts a new generation, so a curve-point drag re-measures. Pan/zoom and idle repaints submit no work.
 The most recent completed curve stays dimmed and marked **Updating…** during an edit;
 its counts are hidden until the current generation completes. Image replacement or
 unsupported adjustments clear the display. **Retry histogram** retries a failed current

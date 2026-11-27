@@ -1211,3 +1211,192 @@ fn large_image_exports_exceed_texture_and_full_readback_limits() {
     );
     report("pixels", &case, started);
 }
+
+/// A film-like lattice (slope below 3, cross-channel terms) of N^3 nodes.
+fn film_lut(n: usize) -> std::sync::Arc<filter_core::lut::CubeLut> {
+    let mut texels = Vec::with_capacity(3 * n * n * n);
+    let s = (n - 1) as f32;
+    for b in 0..n {
+        for g in 0..n {
+            for r in 0..n {
+                let [x, y, z] = [r, g, b].map(|v| v as f32 / s);
+                let out = [
+                    0.9 * x.powf(1.1) + 0.04 * y + 0.037,
+                    0.05 + 0.85 * y + 0.1 * (z - x),
+                    0.1 + 0.7 * z + 0.15 * x * y,
+                ];
+                texels.extend(out.map(|v| half::f16::from_f32(v).to_bits()));
+            }
+        }
+    }
+    std::sync::Arc::new(
+        filter_core::lut::CubeLut::new(n, "film", [0.0; 3], [1.0; 3], texels).unwrap(),
+    )
+}
+fn lut_snapshot(
+    lut: &std::sync::Arc<filter_core::lut::CubeLut>,
+    exposure: f32,
+) -> BasicAdjustments {
+    let mut edit = filter_core::edit::EditState::default();
+    edit.calibration.exposure = exposure;
+    edit.finishing.lut = filter_core::lut::LutSlot::Cube(lut.clone());
+    BasicAdjustments::new(&edit).unwrap()
+}
+fn gradient_source(w: u32, h: u32) -> filter_core::ImageBuffer {
+    filter_core::ImageBuffer::new(
+        w,
+        h,
+        (0..w * h)
+            .map(|i| {
+                let x = (i % w) as f32 / (w - 1) as f32;
+                let y = (i / w) as f32 / (h - 1) as f32;
+                [
+                    0.3 + x * 0.4,
+                    0.35 + y * 0.25,
+                    0.5 - x * 0.2 + y * 0.1,
+                    ALPHAS[i as usize % 4],
+                ]
+                .map(half::f16::from_f32)
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+#[test]
+#[ignore = "requires a software GPU"]
+fn image_exports_render_the_captured_lut_in_every_format_and_resize() {
+    let (device, queue) = software_device(wgpu::Limits::default());
+    let image = gradient_source(53, 11);
+    let snapshot = lut_snapshot(&film_lut(17), 0.3);
+    let exposure_only = BasicAdjustments::exposure(0.3).unwrap();
+    assert!(
+        image
+            .pixels()
+            .iter()
+            .any(|p| snapshot.pixel(p.map(half::f16::to_f32))[..3]
+                != exposure_only.pixel(p.map(half::f16::to_f32))[..3]),
+        "the LUT must change the export"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+    let exif = EXIF;
+    let case = ExportCase {
+        device: &device,
+        queue: &queue,
+        source: &image,
+        exif: Some(&exif),
+        adjustments: &snapshot,
+    };
+    let png16 = dir.join("lut.png");
+    case.run(
+        &png16,
+        ExportFormat::Png(PngOptions::default()),
+        17,
+        ExportResize::Full,
+    );
+    assert_png16_matches_cpu(&case, &png16);
+    check_tiff16_matches_png16(&case, dir, &png16);
+    check_8bit_formats_agree_across_tiles(&case, dir);
+    check_jpeg_matches_cpu_encoder(&case, dir);
+    check_resized_exports_match_cpu(&case, dir);
+}
+
+#[test]
+#[ignore = "requires a software GPU"]
+fn export_snapshot_keeps_the_lut_captured_before_a_later_edit() {
+    let (device, queue) = software_device(wgpu::Limits::default());
+    let image = gradient_source(40, 9);
+    let first = film_lut(17);
+    let snapshot = lut_snapshot(&first, 0.0);
+    // A later edit swaps the LUT; the captured snapshot is unaffected.
+    let later = lut_snapshot(&film_lut(33), 0.0);
+    assert_ne!(
+        snapshot.pixel([0.4, 0.3, 0.2, 1.0]),
+        later.pixel([0.4, 0.3, 0.2, 1.0])
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("snapshot.png");
+    let case = ExportCase {
+        device: &device,
+        queue: &queue,
+        source: &image,
+        exif: None,
+        adjustments: &snapshot,
+    };
+    case.run(
+        &path,
+        ExportFormat::Png(PngOptions::default()),
+        13,
+        ExportResize::Full,
+    );
+    let mut reader = png_reader(&path);
+    for row in image.pixels().as_chunks::<40>().0 {
+        let actual = reader.next_row().unwrap().unwrap();
+        for (original, bytes) in row.iter().zip(actual.data().as_chunks::<8>().0) {
+            let expected = encoded_srgb(working_pixel(&snapshot, *original))
+                .map(|c| (c * 65535.0).round() as i32);
+            for c in 0..3 {
+                let got = i32::from(u16::from_be_bytes([bytes[c * 2], bytes[c * 2 + 1]]));
+                assert!((got - expected[c]).abs() <= 128, "{got} vs {}", expected[c]);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a software GPU and about 800 MiB RAM; exercises >36MP image exports"]
+fn large_image_exports_apply_a_65_cubed_lut_across_tiles() {
+    let (device, queue) = software_device(wgpu::Limits {
+        max_texture_dimension_2d: 2048,
+        ..Default::default()
+    });
+    let (w, h) = (6101_u32, 6001_u32);
+    let source = filter_core::ImageBuffer::new(
+        w,
+        h,
+        (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let level = LEVELS[level_at(x, y)];
+                [level, level, level, ALPHAS[alpha_at(x, y)]].map(half::f16::from_f32)
+            })
+            .collect(),
+    )
+    .unwrap();
+    let adjustments = lut_snapshot(&film_lut(65), 1.0);
+    let case = ExportCase {
+        device: &device,
+        queue: &queue,
+        source: &source,
+        exif: None,
+        adjustments: &adjustments,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("large-lut.png");
+    let started = Instant::now();
+    case.run(
+        &path,
+        ExportFormat::Png(PngOptions::default()),
+        1024,
+        ExportResize::Full,
+    );
+    let expected = LEVELS.map(|v| {
+        let gray = half::f16::from_f32(v);
+        let pixel = working_pixel(&adjustments, [gray, gray, gray, half::f16::ONE]);
+        encoded_srgb(pixel).map(|c| (c * 65535.0).round() as i32)
+    });
+    let mut reader = png_reader(&path);
+    for y in 0..h {
+        let row = reader.next_row().unwrap().expect("missing output row");
+        for (x, bytes) in (0..).zip(row.data().as_chunks::<8>().0) {
+            for c in 0..3 {
+                let got = i32::from(u16::from_be_bytes([bytes[c * 2], bytes[c * 2 + 1]]));
+                let want = expected[level_at(x, y)][c];
+                assert!((got - want).abs() <= 128, "pixel {x},{y}: {got} vs {want}");
+            }
+        }
+    }
+    assert!(reader.next_row().unwrap().is_none());
+    report("LUT pixels", &case, started);
+}

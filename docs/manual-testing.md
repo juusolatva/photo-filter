@@ -80,11 +80,27 @@ source pixel, so its color can differ from the blended screen color at Fit or fr
 - [ ] Move quickly across pixels, then stop; the final reading matches the final pointer position. Switch images; old readings never return.
 - [ ] Repeat while exporting and at 125%/150% display scaling; mapping stays correct and interaction stays responsive.
 
+## Look (LUT)
+
+Headless tests do not open native dialogs, so check these by hand.
+
+- [ ] **Load .cube…** opens the native dialog filtered to `.cube`; cancelling changes nothing and re-enables the button.
+- [ ] Load a 17³ or 33³ creative LUT; the title (or file name) and `N³` appear and the preview and histogram change. Remove restores the original look.
+- [ ] Drag **Strength %**; the preview follows without stalling the UI, and one **Undo** returns to the value before the drag. Double-click resets to 100%.
+- [ ] Load a 65³ LUT; the preview stays responsive. Load the same file again; no undo step appears.
+- [ ] Load a malformed file (truncated, `LUT_1D_SIZE`, text file); the message shows with a line number, and the edit and preview are unchanged.
+- [ ] Load a LUT, save a preset with Finishing, reset, load and apply it; the LUT and strength return. Apply a preset without Finishing; the LUT stays.
+- [ ] Open another image while the dialog is open or loading; the old result does not change the new image.
+- [ ] Export PNG 16-bit, JPEG and a resized WebP with a LUT; the files match the preview. Change or remove the LUT during an export; the file keeps the captured look.
+- [ ] A log or video-range LUT looks wrong, as the hint says; a normal creative LUT looks plausible on dark and bright photos and on transparent pixels.
+- [ ] Repeat with `--software-gpu` on Linux and Windows.
+
 ## Presets
 
 - [ ] Save a preset, reset, load and apply it; the selected adjustments return. Loading alone leaves edits unchanged.
 - [ ] Apply only one preset section; unchecked sections keep their current values.
 - [ ] Load invalid JSON, then try applying unsupported active preset effects; both report errors and leave edits intact.
+- [ ] A preset saved with a LUT loads in this build (schema 2); a hand-edited file with a corrupted LUT payload is rejected with an error naming the LUT.
 - [ ] Cancel load/save dialogs and decline overwriting an existing preset; files and edits stay intact.
 
 ## Export

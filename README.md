@@ -137,7 +137,9 @@ records it, so redo can return to it. Opening an image clears history. History k
 100 steps and about 64 MiB of estimated edit data (relevant only for presets with large
 unknown future filters), dropping the oldest first. Exports keep the settings they captured.
 
-Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
+Expand **Look (LUT)** and use **Load .cube…** to import a 3D `.cube` LUT (sizes 2 to 65, assumed sRGB-encoded input and output). A strength slider (0 to 100%) and **Remove** follow; each is one undo step, and the look appears in the preview, histogram, cursor color and export. Interpolation is tetrahedral on an f16 lattice, rendered by the same WGSL and CPU reference as the other adjustments. `.cube` import only; no `.cube` export yet. See [the LUT stage](docs/pointwise.md#cube-lut-look).
+
+Under **Presets**, use **Load preset…** (or drop a `.pfpreset.json` file), choose sections, and **Apply selected sections**. Unsupported active effects leave the current edit intact with an explanation; unknown future filters are preserved and skipped. **Save preset…** captures the current adjustments and selected sections as versioned JSON (a preset with a LUT embeds it and is schema 2, which older builds reject) with a native overwrite dialog and atomic publication. Imports and serialized saves are limited to 16 MiB. See [the preset workflow and merge contract](docs/presets.md).
 
 Choose **PNG**, **JPEG**, **WebP**, or **TIFF** under **Format**, choose **Full**, **Long edge**, or **Percentage** under **Size**, then **Export…**.
 Full resolution is the default. Long-edge pixels and integer percentages (1–100%)
@@ -244,7 +246,7 @@ source replacement and device/source limits. The app's headless UI test checks e
 coalescing, idle behavior and reserved-panel rendering; ordinary tests reject stale
 image/edit results and cover retry, bins, luminance and clipping semantics.
 
-Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Tone curves, the HSL mixer, color grading, the channel mixer and monochrome render too; detail, defringe and custom nodes remain pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
+Phase 1 adds concrete `EditState`, versioned preset JSON, selective section patches, transactional merges, unknown-node preservation, and desktop preset file save/load. The app uses `EditState` for all basic controls. A shared WGSL renderer drives preview and export, with a rayon CPU reference. Tone curves, the HSL mixer, color grading, the channel mixer, monochrome and `.cube` LUT import render too; detail, defringe and custom nodes remain pending. See [the pointwise algorithms and API](docs/pointwise.md) and [the model and preset contract](docs/presets.md).
 
 The workspace separates reusable image/color primitives (`filter-core`), device-sharing GPU rendering (`filter-gpu`), decoding and metadata (`filter-io`), and the desktop UI (`filter-app`). Neither the core, GPU, nor I/O crates depend on egui.
 
