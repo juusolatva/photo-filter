@@ -26,7 +26,8 @@ pub struct History {
     /// The live edit as of the last settled step.
     settled: Step,
     undo: VecDeque<Step>,
-    redo: Vec<Step>,
+    /// Next redo at the back, furthest at the front.
+    redo: VecDeque<Step>,
     bytes: usize,
 }
 impl History {
@@ -34,7 +35,7 @@ impl History {
         Self {
             settled: Step::new(edit.clone()),
             undo: VecDeque::new(),
-            redo: Vec::new(),
+            redo: VecDeque::new(),
             bytes: 0,
         }
     }
@@ -64,12 +65,12 @@ impl History {
         self.commit(current);
         let step = self.undo.pop_back()?;
         self.bytes -= step.bytes;
-        Some(self.swap(step, |history, live| history.redo.push(live)))
+        Some(self.swap(step, |history, live| history.redo.push_back(live)))
     }
     /// Return the next undone edit. An unrecorded change discards redo first.
     pub fn redo(&mut self, current: &EditState) -> Option<EditState> {
         self.commit(current);
-        let step = self.redo.pop()?;
+        let step = self.redo.pop_back()?;
         self.bytes -= step.bytes;
         Some(self.swap(step, |history, live| history.undo.push_back(live)))
     }
@@ -86,9 +87,8 @@ impl History {
     /// both limits. A step larger than the byte budget is not retained.
     fn trim(&mut self) {
         while self.undo.len() + self.redo.len() > MAX_STEPS || self.bytes > MAX_BYTES {
-            let step = match self.undo.pop_front() {
-                Some(step) => step,
-                None => self.redo.remove(0),
+            let Some(step) = self.undo.pop_front().or_else(|| self.redo.pop_front()) else {
+                break;
             };
             self.bytes -= step.bytes;
         }

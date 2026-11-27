@@ -126,3 +126,20 @@ fn retained_bytes_are_bounded_across_undo_and_redo() {
     assert_eq!(history.retained(), (0, 0, 0));
     assert!(base < 4096);
 }
+
+#[test]
+fn undoing_past_large_edits_evicts_the_furthest_redo() {
+    let near = heavy(MAX_BYTES * 5 / 8);
+    let far = heavy(MAX_BYTES * 5 / 8 + 1);
+    let mut history = History::new(&exposure(0.0));
+    history.commit(&near);
+    history.commit(&far);
+    assert_eq!(history.undo(&far), Some(near.clone()));
+    // Undoing to the start would retain both large edits as redo steps.
+    assert_eq!(history.undo(&near), Some(exposure(0.0)));
+    let (undo, redo, bytes) = history.retained();
+    assert_eq!((undo, redo), (0, 1));
+    assert!(bytes <= MAX_BYTES, "{bytes}");
+    assert_eq!(history.redo(&exposure(0.0)), Some(near.clone()));
+    assert_eq!(history.redo(&near), None, "the furthest redo was dropped");
+}
