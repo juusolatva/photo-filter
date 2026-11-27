@@ -158,8 +158,8 @@ Getting the math, alpha discipline, and GPU/CPU boundaries right early prevents 
   * **Zoom ≥ proxy scale (e.g. 100%):** render the visible region from the full-res source, in cached tiles that are invalidated on parameter change. Show the upscaled proxy while region tiles render (progressive refinement), then swap in the full-res tiles.
   * Both paths use the same `filter-gpu` executor with a global-UV offset/scale, so they are the same code as tiled export.
 * **Pixel-Scale vs Image-Scale Operations:** Every stage/op declares its scale in `pipeline.rs`:
-  * **Image-scale** (defined in normalized units of the image diagonal; preview matches export): blur, bloom/halation, clarity radius, vignette, gradient masks, NR strength.
-  * **Pixel-scale** (defined in *output* pixels; exact only in the full-res path, and the proxy shows a band-limited approximation): sharpening radius, film grain size, convolution kernels (3×3/5×5), posterize/ordered dither patterns. Grain hashes integer *output-pixel* coordinates; at proxy scale it renders the statistically equivalent downsampled grain (reduced amplitude) instead of hashing proxy pixels.
+  * **Image-scale** (defined in normalized units of the image diagonal; preview matches export): blur, bloom/halation, clarity radius, vignette, gradient masks, NR strength, and film grain in its default frame-relative mode (see [Film Emulation Looks](#film-emulation-looks)).
+  * **Pixel-scale** (defined in *output* pixels; exact only in the full-res path, and the proxy shows a band-limited approximation): sharpening radius, film grain size in its optional output-pixel mode, convolution kernels (3×3/5×5), posterize/ordered dither patterns. Grain hashes integer *output-pixel* coordinates; at proxy scale it renders the statistically equivalent downsampled grain (reduced amplitude) instead of hashing proxy pixels.
   * When export resizes, pixel-scale ops run at the output resolution, and an optional **output sharpening** step (screen/matte/glossy amount) runs last.
 * **WebGPU-Safe Ping-Pong Textures:** Use `Rgba16Float` intermediates. Structure compute passes to read from sampled `texture_2d<f32>` and write to `texture_storage_2d<rgba16float, write>`, or use fullscreen fragment passes (`RENDER_ATTACHMENT`).
 * **Viewport Rendering (`egui_wgpu::CallbackTrait`) — decided:**
@@ -190,7 +190,7 @@ Design the pipeline in two complementary layers so simple edits stay fast and in
 5. **Tone Curves (perceptual):** Master curve + R, G, B curves (monotone cubic Hermite spline baked to a 1024-entry 1D LUT with linear extrapolation `> 1.0`; R/G/B evaluate in sRGB primaries).
 6. **Color (perceptual):** Vibrance, Saturation, 8-band HSL (Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta; OkLCh hue), 3-way Color Grading (Shadows/Midtones/Highlights color + balance in Oklab/OkLCh), Channel Mixer / Monochrome toggle, Defringe (purple/green fringe desaturation).
 7. **Detail (linear):** Sharpening / Unsharp Mask (amount, radius, detail threshold) — pixel-scale.
-8. **Finishing:** 3D LUT overlay (`.cube` wrapped in sRGB + strength), Vignette (amount, midpoint, roundness, feather; relative to the crop rect), Procedural Film Grain (amount, size, roughness—driven by a deterministic integer spatial hash in output-pixel coordinates).
+8. **Finishing:** 3D LUT overlay (`.cube` wrapped in sRGB + strength), Vignette (amount, midpoint, roundness, feather; relative to the crop rect), Procedural Film Grain (amount, size, roughness, plus the film-oriented tone response, color and scale mode in [Film Emulation Looks](#film-emulation-looks)—driven by a deterministic integer spatial hash).
 9. **Output (export only):** Resize, output sharpening, gamut compression, transfer/ICC, dither, quantize.
 
 Because Clarity (4) sits between pointwise stages, `.cube` export bakes pointwise Layer 1 stages (2, 3, 5, 6, and Finishing LUT) together with pointwise Layer 2 `FilterNode`s in stage order—skipping Clarity and any spatial stages/nodes—and applies soft gamut compression to sRGB; the export dialog lists any active skipped stages (see §6).
@@ -208,11 +208,23 @@ For users who want to go beyond standard sliders and craft complex/artistic look
   * `Duotone / GradientMap { shadows_color, highlights_color }` [pointwise]
   * `SelectiveColor / HueRangeMask` [pointwise]
   * `RadialOrLinearGradientFilter { geometry, feather, exposure_delta, tint, saturation }` [image-scale; geometry relative to crop rect]
-  * `Bloom / Halation { threshold, radius, intensity }` [image-scale]
+  * `Bloom / Halation { threshold, radius, intensity }` [image-scale] (halation adds a tint; see [Film Emulation Looks](#film-emulation-looks))
   * `Posterize / OrderedDither` [pointwise / pixel-scale] (great overlap with procedural art)
-  * `FilmGrain { amount, size, roughness }` [pixel-scale] (available as a stackable node as well as in Finishing)
+  * `FilmGrain { amount, size, roughness }` [image-scale by default, pixel-scale option] (available as a stackable node as well as in Finishing; the current schema marks it pixel-scale and gains the fields in [Film Emulation Looks](#film-emulation-looks) when grain is implemented)
   * `Lut3D { lut: LutSource, strength }` [pointwise] (built-in ID, content-hashed library LUT, or inline embedded LUT payload)
   * `Unknown(serde_json::Value)` — preserves nodes from newer versions so they round-trip; rendered as a disabled pass-through with a warning badge.
+
+### Film Emulation Looks
+A long-term product goal is to build filters that emulate types of film (color negative, slide, black-and-white stocks) and save them as presets. Each trait of a film look maps to existing stages: tone response to tone curves; per-channel response to R/G/B curves; color character to HSL, color grading and the channel mixer; a complete measured or hand-made look to a `.cube` LUT with strength; black-and-white stocks to the channel mixer/monochrome; texture to grain, halation, vignette and softness. Design points for those stages:
+
+* **Frame-relative grain.** Film grain belongs to the negative, not to the output file. By default, size grain in units of the image diagonal (a nominal film format, e.g. 35mm or 120, sets a sensible default), so a look keeps the same character at any export size and at Fit zoom. Keep an output-pixel mode for digital-style noise. Grain strength follows a luminance response that peaks in the midtones and falls off toward clipped black and white, with optional per-channel (color) grain for color stocks and monochrome grain for B&W. Grain stays deterministic (integer spatial hash on full-resolution source coordinates) so tiles, preview regions and exports agree. The existing `FilmGrain` schema (pixel-scale, amount/size/roughness) has no renderer yet; revise it when grain is implemented rather than shipping the output-pixel default first.
+* **Halation as its own effect.** Halation is light scattering back through the film base around bright highlights, giving a red-orange halo. Model it as a thresholded highlight extraction, a frame-relative blur from the shared mip pyramid, and a tinted additive blend in linear light (tint default red-orange, adjustable), rather than generic white bloom. Threshold acts on scene-referred linear values so HDR highlights halate more.
+* **Looks as an amount-controlled layer.** A film look must not overwrite the user's exposure, white balance or other basic corrections. A look is a named group of Layer 2 nodes (curves, color matrix, LUT, grain, halation) at the appropriate insertion points, with one **Amount** (0–100%) that scales the group's opacity, or each node's strength where opacity would be wrong (for example grain amount). Presets can save a look alone (custom stack only) or together with basic settings via the existing selective sections. The look group and its amount are part of the preset schema, versioned like other nodes.
+* **Black-and-white responses.** The channel mixer's monochrome mode needs spectral-response presets (panchromatic, orthochromatic with weak red, red-filter, green-filter) expressed as Rec.2020 mixer weights, plus a toning step (split tone or duotone) after conversion.
+* **Generic naming.** Starter looks and bundled LUTs use descriptive generic names (for example "Warm Portrait Negative", "Cool Slide", "Orthochromatic B&W"), not film brand or product names, and are made in-house rather than copied from commercial packs.
+* **Later: looks from references.** Generate a LUT (or curve + matrix fit) from a color chart photographed on film and digitally, or from a matched pair of reference images. This is the most accurate route to matching a specific stock and builds on the `.cube` baker.
+
+Recommended order: (1) HSL mixer, color grading and channel mixer (pointwise, fits the current renderer and parity tests); (2) `.cube` import with strength and embedding in presets; (3) the spatial executor, unblocking frame-relative grain, halation and vignette; (4) the custom stack with look groups and Amount, then the preset browser with starter looks.
 
 ---
 
@@ -382,6 +394,7 @@ Undo/redo status (2026-11-27): whole-`EditState` snapshot history is implemented
   * Dynamic `Vec<FilterNode>` custom stack with insertion points (reorder, enable/disable, opacity, blend modes: Normal, Multiply, Screen, Overlay, Soft Light in the specified blend space).
   * Custom nodes: Levels, Gaussian Blur, 3x3/5x5 Convolution Kernels, Color Matrix, Duotone/Gradient Map, Bloom/Halation (mip-pyramid), Radial/Linear Gradient Masks, Film Grain, Posterize/Dither, 3D LUT.
   * `.cube` 3D LUT parser (import, sRGB-wrapped) and lattice baker (export with spatial-stage notice).
+  * Film look groups with a single **Amount**, monochrome spectral-response presets and generic-named starter film looks (see [Film Emulation Looks](#film-emulation-looks)).
   * Left-dock Preset Browser with OS-standard storage, search/tags, selective apply checkboxes, inline embedded LUTs in shared presets, debounced GPU thumbnails, and starter presets in `assets/presets/`.
 * **Done Criteria:** Can create complex multi-stage custom filters, save portable full or partial presets, browse with live thumbnails, and export `.cube` LUTs.
 
@@ -440,3 +453,5 @@ SonarQube CI status (2026-11-17): a separate 30-minute Ubuntu job generates LCOV
 | Proxy texture format | `Rgba16Float` (`Rgba32Float` if `FLOAT32_FILTERABLE` granted) | Broad support. |
 | Source storage | `f16` RGBA | Halves memory vs `f32`. |
 | Highlights/Shadows (v1) | Pointwise | Keeps tone LUT-bakeable; local version later via `process_version`. |
+| Film grain scale | Frame-relative (image diagonal) by default; output-pixel option | Film looks must keep the same grain character at any export size. |
+| Film looks | Layer 2 node group with one Amount | Applying a look must not overwrite the user's basic corrections. |
