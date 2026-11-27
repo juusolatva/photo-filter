@@ -33,11 +33,9 @@ impl Eyedropper {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
-    /// W toggles and Esc cancels, unless `keys_free` is false (text field focus).
-    pub fn handle_keys(&mut self, ctx: &egui::Context, keys_free: bool, enabled: bool) {
-        if !keys_free {
-            return;
-        }
+    /// W toggles (when `enabled`) and Esc cancels. Call only while no text
+    /// field has focus.
+    pub fn handle_keys(&mut self, ctx: &egui::Context, enabled: bool) {
         if enabled && crate::keys::consume_initial_press(ctx, TOGGLE_KEY) {
             self.toggle();
         }

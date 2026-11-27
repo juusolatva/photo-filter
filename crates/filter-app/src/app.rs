@@ -603,13 +603,12 @@ impl PhotoApp {
                 });
                 i.key_down(egui::Key::Space)
             });
-        // Text fields keep their own undo; match Shift+Z before plain Z.
         if keys_free {
-            self.eyedropper
-                .handle_keys(ctx, keys_free, self.source.is_some());
+            self.eyedropper.handle_keys(ctx, self.source.is_some());
             if crate::keys::consume_initial_press(ctx, clipping::TOGGLE_KEY) {
                 self.clipping.toggle_all();
             }
+            // Text fields keep their own undo; match Shift+Z before plain Z.
             if ctx.input_mut(|i| i.consume_shortcut(&REDO) || i.consume_shortcut(&REDO_ALT)) {
                 self.step_history(true);
             } else if ctx.input_mut(|i| i.consume_shortcut(&UNDO)) {
