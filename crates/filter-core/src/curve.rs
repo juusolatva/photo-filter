@@ -55,7 +55,11 @@ impl Spline {
         Self { x, y, tangents }
     }
     /// The curve at `x`, extended linearly with the end tangents outside [0, 1].
+    /// NaN propagates.
     pub fn eval(&self, x: f64) -> f64 {
+        if x.is_nan() {
+            return f64::NAN;
+        }
         let last = self.x.len() - 1;
         if x <= self.x[0] {
             return self.y[0] + self.tangents[0] * (x - self.x[0]);

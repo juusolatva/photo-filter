@@ -51,6 +51,7 @@ fn splines_interpolate_points_without_overshoot() {
         [1.0, 1.0],
     ];
     let spline = Spline::new(&curve(&points));
+    assert!(spline.eval(f64::NAN).is_nan());
     for [x, y] in points {
         assert!((spline.eval(f64::from(x)) - f64::from(y)).abs() < 1e-12);
     }
