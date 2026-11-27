@@ -229,6 +229,63 @@ fn color_rows(row: u32, x: f32, i: u32) -> [f32; 3] {
         }
     }
 }
+/// Rows of gradients, ramps, color sweeps and special values with mixed alpha.
+fn test_image(w: u32, h: u32) -> ImageBuffer {
+    ImageBuffer::new(
+        w,
+        h,
+        (0..w * h)
+            .map(|i| {
+                let x = (i % w) as f32 / (w - 1) as f32;
+                let rgb = match i / w {
+                    0 => [x * x, x, 1.0 - x],
+                    1 => [x * 4.0 - 1.0, x * 2.0 - 0.5, 0.125],
+                    2 => [x * 0.001; 3],
+                    row => color_rows(row, x, i),
+                };
+                [
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
+                    [0.0, 0.25, 0.5, 1.0][i as usize % 4],
+                ]
+                .map(f16::from_f32)
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+/// Render every tile of the plan and assemble the half-float image.
+fn render_tiles(
+    renderer: &TiledExposure,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    image: &ImageBuffer,
+    plan: &TilePlan,
+    settings: &BasicAdjustments,
+) -> Vec<[f16; 4]> {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let mut actual = vec![[f16::ZERO; 4]; w * h];
+    for tile in plan.tiles() {
+        let mut pending = renderer
+            .submit_adjusted(device, queue, image, tile, settings)
+            .unwrap();
+        let started = Instant::now();
+        let data = loop {
+            device.poll(wgpu::PollType::Poll).unwrap();
+            if let Some(data) = pending.try_read().unwrap() {
+                break data;
+            }
+            assert!(started.elapsed() < Duration::from_secs(30));
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        for (row, data) in data.chunks_exact(tile.width as usize).enumerate() {
+            let start = (tile.y as usize + row) * w + tile.x as usize;
+            actual[start..start + data.len()].copy_from_slice(data);
+        }
+    }
+    actual
+}
 #[test]
 #[ignore = "requires a Vulkan/DX12/Metal software adapter"]
 fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
@@ -248,29 +305,7 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
         eprintln!("Software GPU: {:?}", adapter.get_info());
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let (w, h) = (67, 6);
-        let image = ImageBuffer::new(
-            w,
-            h,
-            (0..w * h)
-                .map(|i| {
-                    let x = (i % w) as f32 / (w - 1) as f32;
-                    let rgb = match i / w {
-                        0 => [x * x, x, 1.0 - x],
-                        1 => [x * 4.0 - 1.0, x * 2.0 - 0.5, 0.125],
-                        2 => [x * 0.001; 3],
-                        row => color_rows(row, x, i),
-                    };
-                    [
-                        rgb[0],
-                        rgb[1],
-                        rgb[2],
-                        [0.0, 0.25, 0.5, 1.0][i as usize % 4],
-                    ]
-                    .map(f16::from_f32)
-                })
-                .collect(),
-        )
-        .unwrap();
+        let image = test_image(w, h);
         let pixels: Vec<[f32; 4]> = image.pixels().iter().map(|p| p.map(f16::to_f32)).collect();
         let code = format!(
             "{}\n{}\n{}",
@@ -396,25 +431,7 @@ fn basic_stages_match_cpu_in_f32_and_across_half_float_tiles() {
             let mut reference = None;
             for edge in [w, 17] {
                 let plan = TilePlan::new(w, h, &device.limits(), edge).unwrap();
-                let mut actual = vec![[f16::ZERO; 4]; pixels.len()];
-                for tile in plan.tiles() {
-                    let mut pending = renderer
-                        .submit_adjusted(&device, &queue, &image, tile, settings)
-                        .unwrap();
-                    let started = Instant::now();
-                    let data = loop {
-                        device.poll(wgpu::PollType::Poll).unwrap();
-                        if let Some(data) = pending.try_read().unwrap() {
-                            break data;
-                        }
-                        assert!(started.elapsed() < Duration::from_secs(30));
-                        std::thread::sleep(Duration::from_millis(1));
-                    };
-                    for (row, data) in data.chunks_exact(tile.width as usize).enumerate() {
-                        let start = (tile.y as usize + row) * w as usize + tile.x as usize;
-                        actual[start..start + data.len()].copy_from_slice(data);
-                    }
-                }
+                let actual = render_tiles(&renderer, &device, &queue, &image, &plan, settings);
                 for (p, q) in expected.iter().zip(&actual) {
                     compare_stored(*p, q.map(f16::to_f32), case);
                 }

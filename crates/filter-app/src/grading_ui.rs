@@ -4,6 +4,7 @@
 use crate::mixer_ui::{paint_gradient, percent, swatch};
 use eframe::egui;
 use filter_core::edit::{Color, GradingWheel};
+use std::sync::OnceLock;
 
 pub const WHEEL_NAMES: [&str; 3] = ["Shadows", "Midtones", "Highlights"];
 /// Rainbow track stops across the hue slider (turns 0..1).
@@ -22,6 +23,7 @@ pub fn degrees_text(turns: f64) -> String {
     format!("{:.0}°", turns * 360.0)
 }
 /// Typed degrees (a trailing degree sign is allowed) back to turns in 0..1.
+/// Hue is circular, so values wrap: 370 is 10 degrees and -10 is 350.
 pub fn parse_degrees(text: &str) -> Option<f64> {
     text.trim()
         .trim_end_matches('°')
@@ -29,7 +31,7 @@ pub fn parse_degrees(text: &str) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .filter(|v| v.is_finite())
-        .map(|v| (v / 360.0).clamp(0.0, 1.0))
+        .map(|v| (v / 360.0).rem_euclid(1.0))
 }
 /// Chroma shown as 0..100.
 pub fn chroma_text(value: f64) -> String {
@@ -177,23 +179,21 @@ fn slider(
     }
     response.changed() || reset
 }
+/// Rainbow colors at each stop boundary; static, so computed once.
+fn rainbow() -> &'static [egui::Color32; RAINBOW_STOPS + 1] {
+    static COLORS: OnceLock<[egui::Color32; RAINBOW_STOPS + 1]> = OnceLock::new();
+    COLORS.get_or_init(|| {
+        std::array::from_fn(|i| swatch(i as f32 / RAINBOW_STOPS as f32 * 360.0, 0.72, 1.0))
+    })
+}
 fn hue_track(ui: &mut egui::Ui, rect: egui::Rect) {
     let step = rect.width() / RAINBOW_STOPS as f32;
-    for i in 0..RAINBOW_STOPS {
-        let (from, to) = (
-            i as f32 / RAINBOW_STOPS as f32,
-            (i + 1) as f32 / RAINBOW_STOPS as f32,
-        );
+    for (i, colors) in rainbow().windows(2).enumerate() {
         let part = egui::Rect::from_min_size(
             egui::pos2(rect.left() + step * i as f32, rect.top()),
             egui::vec2(step, rect.height()),
         );
-        paint_gradient(
-            ui,
-            part,
-            swatch(from * 360.0, 0.72, 1.0),
-            swatch(to * 360.0, 0.72, 1.0),
-        );
+        paint_gradient(ui, part, colors[0], colors[1]);
     }
 }
 fn chroma_track(ui: &mut egui::Ui, rect: egui::Rect) {

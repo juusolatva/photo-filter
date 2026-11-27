@@ -627,6 +627,36 @@ fn reset_mixer_and_bw_response_touch_only_the_mixer() {
 /// relies on the refined root.
 #[test]
 fn hsl_output_is_well_conditioned_against_cube_root_error() {
+    let edits = conditioning_edits();
+    let inputs = conditioning_inputs();
+    let rel = 1.2e-7f32;
+    let mut worst = Conditioning::default();
+    for edit in &edits {
+        let adjustments = BasicAdjustments::new(edit).unwrap();
+        for rgb in &inputs {
+            worst.merge(perturbation_ratio(&adjustments, *rgb, rel));
+        }
+    }
+    let (ratio, at) = (worst.ratio, worst.at);
+    println!("max cube-root conditioning ratio: {ratio} at {at}");
+    assert!(ratio < 1.0, "ratio {ratio} at {at}");
+}
+
+#[derive(Default)]
+struct Conditioning {
+    ratio: f32,
+    at: String,
+}
+impl Conditioning {
+    fn merge(&mut self, other: Self) {
+        if other.ratio > self.ratio {
+            *self = other;
+        }
+    }
+}
+
+/// Extreme single-band edits plus seeded random all-band edits.
+fn conditioning_edits() -> Vec<EditState> {
     use filter_core::edit::HslBand;
     let mut seed = 7919u32;
     let mut lcg = || {
@@ -657,13 +687,18 @@ fn hsl_output_is_well_conditioned_against_cube_root_error() {
         e.tone.contrast = 0.5;
         edits.push(e);
     }
+    edits
+}
+
+/// Hue sweeps across the chroma gate, plus gray, black, negative and HDR pixels.
+fn conditioning_inputs() -> Vec<[f32; 3]> {
+    let lab = |degrees: f32, chroma: f32, l: f32| {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        oklab_to_rec2020([l, chroma * cos, chroma * sin])
+    };
     let mut inputs = Vec::new();
     for i in 0..400 {
         let x = i as f32 / 400.0;
-        let lab = |degrees: f32, chroma: f32, l: f32| {
-            let (sin, cos) = degrees.to_radians().sin_cos();
-            oklab_to_rec2020([l, chroma * cos, chroma * sin])
-        };
         inputs.push(lab(x * 360.0, 0.02 + 0.2 * x, 0.6));
         inputs.push(lab(
             x * 360.0 + 3.0,
@@ -672,27 +707,25 @@ fn hsl_output_is_well_conditioned_against_cube_root_error() {
         ));
     }
     inputs.extend([[0.18; 3], [0.0; 3], [-0.3, 0.2, 0.05], [4.0, 0.1, -0.2]]);
-    let rel = 1.2e-7f32;
-    let mut worst = 0.0f32;
-    let mut at = String::new();
-    for edit in &edits {
-        let adjustments = BasicAdjustments::new(edit).unwrap();
-        for rgb in &inputs {
-            let px = [rgb[0], rgb[1], rgb[2], 1.0];
-            let base = adjustments.pixel(px);
-            for signs in 0..8u32 {
-                let err = std::array::from_fn(|i| if signs >> i & 1 == 0 { rel } else { -rel });
-                let out = adjustments.pixel_perturbed(px, err);
-                for c in 0..3 {
-                    let ratio = (out[c] - base[c]).abs() / (2e-5 * (1.0 + base[c].abs()));
-                    if ratio > worst {
-                        worst = ratio;
-                        at = format!("{rgb:?} channel {c}: {} -> {}", base[c], out[c]);
-                    }
-                }
-            }
+    inputs
+}
+
+/// Largest output shift over every sign combination of the cube-root error,
+/// relative to the GPU parity tolerance.
+fn perturbation_ratio(adjustments: &BasicAdjustments, rgb: [f32; 3], rel: f32) -> Conditioning {
+    let px = [rgb[0], rgb[1], rgb[2], 1.0];
+    let base = adjustments.pixel(px);
+    let mut worst = Conditioning::default();
+    for signs in 0..8u32 {
+        let err = std::array::from_fn(|i| if signs >> i & 1 == 0 { rel } else { -rel });
+        let out = adjustments.pixel_perturbed(px, err);
+        for c in 0..3 {
+            let ratio = (out[c] - base[c]).abs() / (2e-5 * (1.0 + base[c].abs()));
+            worst.merge(Conditioning {
+                ratio,
+                at: format!("{rgb:?} channel {c}: {} -> {}", base[c], out[c]),
+            });
         }
     }
-    println!("max cube-root conditioning ratio: {worst} at {at}");
-    assert!(worst < 1.0, "ratio {worst} at {at}");
+    worst
 }

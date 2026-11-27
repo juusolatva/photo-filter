@@ -6,6 +6,7 @@ use filter_core::{
     edit::{Color, HslBand},
     grading::BAND_CENTER_DEGREES,
 };
+use std::sync::OnceLock;
 
 pub const BAND_NAMES: [&str; 8] = [
     "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
@@ -23,6 +24,14 @@ pub enum Channel {
 }
 impl Channel {
     pub const ALL: [Self; 3] = [Self::Hue, Self::Saturation, Self::Luminance];
+    /// Position in [`Self::ALL`].
+    fn index(self) -> usize {
+        match self {
+            Self::Hue => 0,
+            Self::Saturation => 1,
+            Self::Luminance => 2,
+        }
+    }
     fn label(self) -> &'static str {
         match self {
             Self::Hue => "Hue",
@@ -119,12 +128,21 @@ pub fn swatch(degrees: f32, l: f32, chroma_fraction: f32) -> egui::Color32 {
     let [r, g, b] = linear.map(|v| (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8);
     egui::Color32::from_rgb(r, g, b)
 }
-/// Band swatch: the gamut-scaled color at the band center.
+/// Band swatch: the gamut-scaled color at the band center. The table is built
+/// once, since the swatches are static and each needs a gamut bisection.
 pub fn band_color(band: usize) -> egui::Color32 {
-    swatch(BAND_CENTER_DEGREES[band], 0.72, 1.0)
+    static COLORS: OnceLock<[egui::Color32; 8]> = OnceLock::new();
+    COLORS.get_or_init(|| std::array::from_fn(|band| swatch(BAND_CENTER_DEGREES[band], 0.72, 1.0)))
+        [band]
 }
-/// Colors at the minimum and maximum of a channel's slider track.
+/// Colors at the minimum and maximum of a channel's slider track (cached).
 pub fn track_colors(channel: Channel, band: usize) -> [egui::Color32; 2] {
+    static COLORS: OnceLock<[[[egui::Color32; 2]; 8]; 3]> = OnceLock::new();
+    COLORS.get_or_init(|| {
+        Channel::ALL.map(|channel| std::array::from_fn(|band| compute_track_colors(channel, band)))
+    })[channel.index()][band]
+}
+fn compute_track_colors(channel: Channel, band: usize) -> [egui::Color32; 2] {
     let degrees = BAND_CENTER_DEGREES[band];
     match channel {
         Channel::Hue => [

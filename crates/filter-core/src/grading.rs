@@ -7,6 +7,7 @@
 //! per snapshot, when uniforms are built, so CPU and GPU read identical f32 rows.
 use crate::color::{IDENTITY, Matrix3, REC2020_LUMA, SRGB_TO_REC2020};
 use crate::edit::{GradingWheel, HslBand};
+use std::sync::OnceLock;
 
 /// OkLCh hue (degrees) of the band reference colors, measured from the repo's
 /// sRGB to Oklab conversion: #FF0000, #FF8000, #FFFF00, #00FF00, #00FFFF,
@@ -238,8 +239,9 @@ pub fn fold_mixer(wb: &Matrix3, mixer: &Matrix3, monochrome: bool) -> Option<Mat
     if !mixer_active(mixer, monochrome) {
         return None;
     }
+    static INVERSE: OnceLock<Mat64> = OnceLock::new();
     let a = to_f64(SRGB_TO_REC2020);
-    let inverse = inverse64(&a);
+    let inverse = *INVERSE.get_or_init(|| inverse64(&a));
     let m = to_f64(*mixer);
     let wb = to_f64(*wb);
     let work = if monochrome {
